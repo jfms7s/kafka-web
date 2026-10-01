@@ -31,9 +31,19 @@ from kafka_web.services.offsets import plan_start_offsets
 
 QUEUE_SIZE = 1000
 POLL_INTERVAL_S = 0.5
-# Error events librdkafka recovers from by itself (it reconnects): a live stream keeps going.
-# Everything else, including _ALL_BROKERS_DOWN, ends the stream with an error frame.
-_TRANSIENT_ERRORS = {KafkaError._TRANSPORT}
+# Client-level errors (broker connections, authentication) never come out of `poll()`: librdkafka
+# hands them to the `error_cb`, which it calls while serving `poll()` on the worker thread. These
+# end the stream; anything else (e.g. one `_TRANSPORT` disconnect, which librdkafka retries by
+# itself) is only logged. A dead cluster thus surfaces as an error frame instead of a stream
+# that silently stays "live".
+_FATAL_CLIENT_ERRORS = {
+    KafkaError._ALL_BROKERS_DOWN,
+    KafkaError.SASL_AUTHENTICATION_FAILED,
+    KafkaError._AUTHENTICATION,
+    KafkaError.TOPIC_AUTHORIZATION_FAILED,
+    KafkaError.GROUP_AUTHORIZATION_FAILED,
+    KafkaError.CLUSTER_AUTHORIZATION_FAILED,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +106,7 @@ class StreamWorker(threading.Thread):
         self._consumer_factory = consumer_factory
         self._poll_interval = poll_interval
         self.error: AppError | None = None
+        self._client_error: KafkaError | None = None  # first fatal error_cb report
 
     def run(self) -> None:
         try:
@@ -114,7 +125,18 @@ class StreamWorker(threading.Thread):
 
     def _config(self) -> dict[str, Any]:
         # No EOF events: a live stream sits at the end of the log most of the time.
-        return {**consumer_config(self._client_config), "enable.partition.eof": "false"}
+        return {
+            **consumer_config(self._client_config),
+            "enable.partition.eof": "false",
+            "error_cb": self._on_client_error,
+        }
+
+    def _on_client_error(self, err: KafkaError) -> None:
+        if err.fatal() or err.code() in _FATAL_CLIENT_ERRORS:
+            if self._client_error is None:
+                self._client_error = err
+        else:
+            logger.info("Live stream on %r: client error %s", self._topic, err.name())
 
     def _assign(self, consumer: Consumer) -> bool:
         """Assign the start positions; False when stopped during setup."""
@@ -147,12 +169,12 @@ class StreamWorker(threading.Thread):
     def _poll(self, consumer: Consumer) -> None:
         while not self.stop_event.is_set():
             msg = call_with_timeout(lambda: consumer.poll(self._poll_interval))
+            if self._client_error is not None:  # reported to the error_cb during that poll
+                raise map_kafka_exception(self._client_error)
             if msg is None:
                 continue
-            err = msg.error()
+            err = msg.error()  # a per-partition consumer error (unknown topic, ACL, ...)
             if err is None:
                 self.queue.put(msg)
-            elif err.code() in _TRANSIENT_ERRORS:
-                logger.info("Live stream on %r: transient error %s", self._topic, err.name())
             elif err.code() != KafkaError._PARTITION_EOF:
                 raise map_kafka_exception(err)

@@ -20,7 +20,7 @@ from kafka_web.config.store import ClusterStore
 from kafka_web.kafka.registry import ConnectionRegistry
 from kafka_web.services.stream import BoundedDropQueue
 from tests.conftest import MemoryKeyring
-from tests.fakes import FakeMessage, Fakes, LiveConsumers, LiveFakeConsumer
+from tests.fakes import ErrorEvent, FakeMessage, Fakes, LiveConsumers, LiveFakeConsumer
 
 LOCAL = "http://127.0.0.1:8000"
 # websocket_connect ignores base_url (it defaults to ws://testserver, a Host the app refuses).
@@ -334,6 +334,21 @@ def test_foreign_host_is_refused(client: TestClient, consumers: LiveConsumers) -
     with refused, client.websocket_connect(URL, headers={"host": "evil.example"}):
         pass
     assert consumers.created == []
+
+
+def test_unreachable_brokers_end_the_stream_with_an_error_frame(
+    client: TestClient, consumers: LiveConsumers
+) -> None:
+    with client.websocket_connect(URL) as ws:
+        consumer = streaming(consumers)
+        consumer.feed(ErrorEvent(KafkaError(KafkaError._ALL_BROKERS_DOWN, "1/1 brokers are down")))
+        frame = ws.receive_json()
+        assert close_code(ws) == 1011
+        assert active_streams(client) == 0
+
+    assert (frame["type"], frame["code"]) == ("error", "broker_unreachable")
+    assert "brokers are down" in frame["message"]
+    assert consumer.closed
 
 
 def test_messages_before_a_failure_are_delivered_before_the_error_frame(

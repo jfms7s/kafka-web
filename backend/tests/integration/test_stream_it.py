@@ -8,9 +8,10 @@ from typing import Any
 
 import pytest
 from confluent_kafka import Producer
-from confluent_kafka.admin import AdminClient
+from confluent_kafka.admin import AdminClient, NewTopic
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from testcontainers.core.container import DockerContainer
 
 pytestmark = pytest.mark.integration
 
@@ -158,3 +159,35 @@ def test_unknown_topic_sends_an_error_frame(open_stream: Callable[..., Frames]) 
     assert frame is not None
     assert (frame["type"], frame["code"]) == ("error", "topic_not_found")
     assert frames.wait_closed(timeout=5) == 1011
+
+
+def test_stream_ends_with_an_error_when_the_broker_dies(
+    api: TestClient, disposable_kafka: tuple[str, DockerContainer]
+) -> None:
+    """A dead cluster must not leave the stream silently "live" (librdkafka retries forever)."""
+    bootstrap, container = disposable_kafka
+    body = {"name": "doomed", "env": "dev", "bootstrap_servers": bootstrap}
+    assert api.post("/api/clusters", json=body).status_code == 201
+    admin = AdminClient({"bootstrap.servers": bootstrap})
+    admin.create_topics([NewTopic("doomed-topic", 1, 1)])["doomed-topic"].result(timeout=10)
+    producer = Producer({"bootstrap.servers": bootstrap})
+
+    url = f"{WS}/api/clusters/doomed/topics/doomed-topic/stream"
+    with api.websocket_connect(url) as ws:
+        frames = Frames(ws)
+        wait_until_live(frames, producer, "doomed-topic")
+        container.stop()
+        stopped_at = time.monotonic()
+
+        frame = frames.next(timeout=15)
+        while frame is not None and frame["type"] == "messages":  # late probes
+            frame = frames.next(timeout=15 - (time.monotonic() - stopped_at))
+        waited = time.monotonic() - stopped_at
+
+        assert frame is not None, "no error frame within 15 s of the broker stopping"
+        assert frame["type"] == "error", frame
+        assert frame["code"] == "broker_unreachable"
+        assert frames.wait_closed(timeout=5) == 1011
+    [conn] = api.get("/api/status").json()["connections"]
+    assert conn["active_streams"] == 0
+    print(f"error frame {waited:.1f}s after the broker stopped")  # visible with -s

@@ -274,10 +274,19 @@ class FakeConsumer:
         self.closed = True
 
 
+class ErrorEvent:
+    """A client-level error (broker connection, authentication): librdkafka hands these to the
+    `error_cb` while serving `poll()`, never as a polled message."""
+
+    def __init__(self, err: Any):
+        self.err = err
+
+
 class LiveFakeConsumer(FakeConsumer):
     """FakeConsumer for a consumer thread: `poll` really waits, so an idle loop does not spin.
 
-    `feed(...)` hands items (messages, error events, exceptions to raise) to the next polls.
+    `feed(...)` hands items to the next polls: messages, per-message error events, exceptions to
+    raise, or `ErrorEvent`s, which are passed to the configured `error_cb` (the poll returns None).
     `assigned_event` / `closed_event` let a test wait for the worker instead of sleeping.
     """
 
@@ -305,6 +314,9 @@ class LiveFakeConsumer(FakeConsumer):
             return None
         if isinstance(item, BaseException):
             raise item
+        if isinstance(item, ErrorEvent):
+            self.conf["error_cb"](item.err)
+            return None
         return item
 
     def close(self) -> None:

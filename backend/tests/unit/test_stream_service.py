@@ -10,7 +10,7 @@ from kafka_web.errors import BrokerError, NotFound, ValidationFailed
 from kafka_web.services.consume import validate_start
 from kafka_web.services.decode import MessageView, to_message_view
 from kafka_web.services.stream import BoundedDropQueue, StreamParams, StreamWorker
-from tests.fakes import FakeMessage, LiveConsumers, LiveFakeConsumer, eof
+from tests.fakes import ErrorEvent, FakeMessage, LiveConsumers, LiveFakeConsumer, eof
 
 CONF = {"bootstrap.servers": "b1:9092"}
 POLL_S = 0.1
@@ -326,18 +326,53 @@ def test_error_event_ends_the_stream_with_the_mapped_error() -> None:
     assert consumer.closed
 
 
-def test_transient_disconnect_event_does_not_end_the_stream() -> None:
+def test_consumer_reports_client_errors_through_an_error_cb() -> None:
+    consumers = LiveConsumers()
+    worker, _, stop = start_worker(consumers)
+    consumer = started(consumers)
+    stopped(worker, stop)
+
+    assert callable(consumer.conf["error_cb"])
+
+
+def test_transport_blip_does_not_end_the_stream() -> None:
     consumers = LiveConsumers()
     worker, queue, stop = start_worker(consumers)
     consumer = started(consumers)
 
-    consumer.feed(FakeMessage(error=KafkaError(KafkaError._TRANSPORT)), FakeMessage(offset=3))
+    consumer.feed(ErrorEvent(KafkaError(KafkaError._TRANSPORT)), FakeMessage(offset=3))
     messages = wait_for(queue, 1)
 
     assert worker.is_alive()
     stopped(worker, stop)
     assert [m.offset() for m in messages] == [3]
     assert worker.error is None
+
+
+@pytest.mark.parametrize(
+    ("err", "status", "code"),
+    [
+        (KafkaError(KafkaError._ALL_BROKERS_DOWN), 502, "broker_unreachable"),
+        (KafkaError(KafkaError.SASL_AUTHENTICATION_FAILED), 401, "authentication_failed"),
+        (KafkaError(KafkaError._AUTHENTICATION), 401, "authentication_failed"),
+        (KafkaError(KafkaError.TOPIC_AUTHORIZATION_FAILED), 403, "authorization_failed"),
+        (KafkaError(KafkaError.CLUSTER_AUTHORIZATION_FAILED), 403, "authorization_failed"),
+        (KafkaError(KafkaError._FATAL, fatal=True), 502, "broker_error"),
+    ],
+    ids=["all-brokers-down", "sasl", "authentication", "topic-acl", "cluster-acl", "fatal"],
+)
+def test_fatal_client_errors_end_the_stream(err: KafkaError, status: int, code: str) -> None:
+    consumers = LiveConsumers()
+    worker, _, _ = start_worker(consumers)
+    consumer = started(consumers)
+
+    consumer.feed(ErrorEvent(err))
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert worker.error is not None
+    assert (worker.error.status, worker.error.code) == (status, code)
+    assert consumer.closed
 
 
 def test_unknown_topic_fails_setup_without_assigning() -> None:
