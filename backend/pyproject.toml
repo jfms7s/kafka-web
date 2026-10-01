@@ -37,6 +37,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "httpx2>=2.13.1",
     "pytest>=9.1.1",
     "ruff>=0.16.9",
     "testcontainers>=4",
