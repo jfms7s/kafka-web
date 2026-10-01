@@ -1,6 +1,8 @@
 """Recording fakes for confluent-kafka clients, injected through ConnectionRegistry factories."""
 
+import queue
 import threading
+import time
 from typing import Any
 
 
@@ -270,3 +272,64 @@ class FakeConsumer:
     def close(self) -> None:
         self.calls.append("close")
         self.closed = True
+
+
+class LiveFakeConsumer(FakeConsumer):
+    """FakeConsumer for a consumer thread: `poll` really waits, so an idle loop does not spin.
+
+    `feed(...)` hands items (messages, error events, exceptions to raise) to the next polls.
+    `assigned_event` / `closed_event` let a test wait for the worker instead of sleeping.
+    """
+
+    def __init__(self, conf: dict[str, Any], **kwargs: Any):
+        super().__init__(conf, clock=FakeClock(), **kwargs)
+        self._inbox: queue.Queue[Any] = queue.Queue()
+        self.assigned_event = threading.Event()
+        self.closed_event = threading.Event()
+
+    def feed(self, *items: Any) -> None:
+        for item in items:
+            self._inbox.put(item)
+
+    def assign(self, tps) -> None:
+        super().assign(tps)
+        self.assigned_event.set()
+
+    def poll(self, timeout: float | None = None):
+        self.calls.append("poll")
+        assert timeout is not None
+        self.poll_timeouts.append(timeout)
+        try:
+            item = self._inbox.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def close(self) -> None:
+        super().close()
+        self.closed_event.set()
+
+
+class LiveConsumers:
+    """A consumer factory recording every `LiveFakeConsumer` it creates."""
+
+    def __init__(self, **consumer_kwargs: Any):
+        self.created: list[LiveFakeConsumer] = []
+        self.consumer_kwargs = consumer_kwargs
+        self.error: Exception | None = None  # raised by the factory instead of creating one
+
+    def __call__(self, conf: dict[str, Any]) -> LiveFakeConsumer:
+        if self.error is not None:
+            raise self.error
+        consumer = LiveFakeConsumer(conf, **self.consumer_kwargs)
+        self.created.append(consumer)
+        return consumer
+
+    def wait_for_consumer(self, timeout: float = 2.0) -> LiveFakeConsumer:
+        deadline = time.monotonic() + timeout
+        while not self.created:
+            assert time.monotonic() < deadline, "no consumer was created"
+            time.sleep(0.01)
+        return self.created[-1]
