@@ -102,7 +102,9 @@ from the keyring, is shown as *unusable* with the reason.
 | 9092 | PLAINTEXT | none |
 | 9094 | SASL_SSL, SASL/PLAIN | `app` / `app-secret` (also `admin` / `admin-secret`) |
 
-Topic auto-creation is off; create topics with the broker's CLI.
+Topic auto-creation is off; create topics with the broker's CLI. The ports are published on
+`127.0.0.1` only, so librdkafka logs a harmless `Connect to ipv6#[::1]:9094 failed: Connection
+refused` line before it falls back to IPv4.
 
 ```bash
 dev/gen-certs.sh                                  # once: dev/certs/{ca.pem,broker.pem,truststore.jks}
