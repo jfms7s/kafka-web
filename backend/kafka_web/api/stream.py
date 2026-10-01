@@ -20,7 +20,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 
-from kafka_web.api.security import is_local_origin
+from kafka_web.api.security import request_is_same_origin
 from kafka_web.errors import AppError, BrokerError, ValidationFailed
 from kafka_web.kafka.registry import ConnectionRegistry
 from kafka_web.services.consume import validate_start
@@ -82,8 +82,8 @@ async def stream(
     partition: int | None = None,
 ) -> None:
     # The HTTP Origin middleware does not see WebSockets, and browsers let any page open one:
-    # refuse a foreign page before accepting (the handshake then fails with 403).
-    if not is_local_origin(ws.headers.get("origin")):
+    # refuse another origin's page before accepting (the handshake then fails with 403).
+    if not request_is_same_origin(ws.scope):
         await ws.close(code=_CLOSE_POLICY)
         return
     await ws.accept()

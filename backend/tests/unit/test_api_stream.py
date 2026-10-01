@@ -277,7 +277,15 @@ def test_worker_failure_sends_error_frame_and_closes_1011(
 
 
 @pytest.mark.parametrize(
-    "origin", ["http://evil.example", "http://127.0.0.1.evil.example", "null", "file://"]
+    "origin",
+    [
+        "http://evil.example",
+        "http://127.0.0.1.evil.example",
+        "null",
+        "file://",
+        "http://127.0.0.1:5173",  # another local process on another port
+        "http://localhost:8000",  # a different origin from 127.0.0.1:8000
+    ],
 )
 def test_foreign_origin_is_refused_before_accept(
     client: TestClient, consumers: LiveConsumers, origin: str
@@ -292,8 +300,17 @@ def test_foreign_origin_is_refused_before_accept(
     assert consumers.created == []
 
 
-def test_local_origin_is_accepted(client: TestClient, consumers: LiveConsumers) -> None:
-    with client.websocket_connect(URL, headers={"origin": "http://localhost:5173"}) as ws:
+def test_same_origin_is_accepted(client: TestClient, consumers: LiveConsumers) -> None:
+    with client.websocket_connect(URL, headers={"origin": "http://127.0.0.1:8000"}) as ws:
+        streaming(consumers)
+        ws.send_text("stop")
+        assert close_code(ws) == 1000
+
+
+def test_vite_dev_proxy_origin_is_accepted(client: TestClient, consumers: LiveConsumers) -> None:
+    """The Vite proxy (ws: true, changeOrigin false) forwards Host 127.0.0.1:5173 unchanged."""
+    url = "ws://127.0.0.1:5173/api/clusters/dev/topics/orders/stream"
+    with client.websocket_connect(url, headers={"origin": "http://127.0.0.1:5173"}) as ws:
         streaming(consumers)
         ws.send_text("stop")
         assert close_code(ws) == 1000
