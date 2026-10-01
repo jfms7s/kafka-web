@@ -26,11 +26,16 @@ class GroupListView(BaseModel):
     groups: list[GroupSummaryView]
 
 
+class AssignmentItem(BaseModel):
+    topic: str
+    partition: int
+
+
 class MemberItem(BaseModel):
     member_id: str
     client_id: str
     host: str
-    assignments: list[tuple[str, int]]
+    assignments: list[AssignmentItem]
 
 
 class OffsetItem(BaseModel):
@@ -87,7 +92,10 @@ def list_groups(
 @router.get("/clusters/{name}/groups/{group}")
 def describe_group(name: str, group: str, registry: RegistryDep) -> GroupDetailView:
     admin = open_connection(registry, name).admin
-    return GroupDetailView.model_validate(asdict(group_service.describe_group(admin, group)))
+    detail = asdict(group_service.describe_group(admin, group))
+    for member in detail["members"]:  # (topic, partition) pairs → objects, friendlier for clients
+        member["assignments"] = [{"topic": t, "partition": p} for t, p in member["assignments"]]
+    return GroupDetailView.model_validate(detail)
 
 
 @router.post("/clusters/{name}/groups", status_code=201)

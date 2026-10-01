@@ -96,7 +96,7 @@ def test_describe_group_with_members_and_lag(harness: Harness) -> None:
                 "member_id": "m1",
                 "client_id": "svc",
                 "host": "/10.1.1.1",
-                "assignments": [["orders", 0]],
+                "assignments": [{"topic": "orders", "partition": 0}],
             }
         ],
         "offsets": [{"topic": "orders", "partition": 0, "committed": 3, "end": 10, "lag": 7}],
