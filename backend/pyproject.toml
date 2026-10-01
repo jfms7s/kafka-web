@@ -1,0 +1,43 @@
+[project]
+name = "kafka-web"
+version = "0.1.0"
+description = "Local web UI for Apache Kafka"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "confluent-kafka>=2.6",
+    "cryptography>=50.0.2",
+    "fastapi>=0.142.2",
+    "keyring>=25.7.0",
+    "pydantic>=2.13.5",
+    "pyjks>=20.0.0",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = ["integration: needs a running Kafka container (podman)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+    "testcontainers>=4",
+]
