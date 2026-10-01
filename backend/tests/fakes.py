@@ -290,8 +290,20 @@ class LiveFakeConsumer(FakeConsumer):
     `assigned_event` / `closed_event` let a test wait for the worker instead of sleeping.
     """
 
-    def __init__(self, conf: dict[str, Any], **kwargs: Any):
+    def __init__(
+        self,
+        conf: dict[str, Any],
+        *,
+        hanging_metadata_calls: int = 0,
+        failing_metadata_calls: int = 0,
+        **kwargs: Any,
+    ):
         super().__init__(conf, clock=FakeClock(), **kwargs)
+        # A paused broker: these many metadata calls block for their whole timeout, then time out.
+        self.hanging_metadata_calls = hanging_metadata_calls
+        # An unreachable one: these many metadata calls fail at once.
+        self.failing_metadata_calls = failing_metadata_calls
+        self.metadata_call_times: list[float] = []
         self._inbox: queue.Queue[Any] = queue.Queue()
         self.assigned_event = threading.Event()
         self.closed_event = threading.Event()
@@ -299,6 +311,21 @@ class LiveFakeConsumer(FakeConsumer):
     def feed(self, *items: Any) -> None:
         for item in items:
             self._inbox.put(item)
+
+    def list_topics(self, topic: str | None = None, timeout: float | None = None):
+        from confluent_kafka import KafkaError, KafkaException
+
+        self.metadata_call_times.append(time.monotonic())
+        if self.hanging_metadata_calls > 0:
+            self.hanging_metadata_calls -= 1
+            self.metadata_timeouts.append(timeout)
+            threading.Event().wait(timeout)
+            raise KafkaException(KafkaError(KafkaError._TIMED_OUT))
+        if self.failing_metadata_calls > 0:
+            self.failing_metadata_calls -= 1
+            self.metadata_timeouts.append(timeout)
+            raise KafkaException(KafkaError(KafkaError._TRANSPORT))
+        return super().list_topics(topic, timeout)
 
     def assign(self, tps) -> None:
         super().assign(tps)

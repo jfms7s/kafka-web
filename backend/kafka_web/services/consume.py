@@ -77,7 +77,7 @@ class Budget:
         """Timeout for one blocking call: its own cap, or what is left if that is less."""
         remaining = self.remaining()
         if remaining <= 0:
-            raise KafkaTimeout("Kafka did not answer the snapshot setup calls in time")
+            raise KafkaTimeout("Kafka did not answer the setup calls in time")
         return min(CALL_TIMEOUT_S, remaining)
 
 
@@ -200,7 +200,7 @@ def _snapshot(
     watermarks = fetch_watermarks(consumer, topic, partitions, setup)
     lookup = None
     if params.start == "timestamp":
-        assert params.timestamp is not None  # _validate
+        assert params.timestamp is not None  # validate_start
         lookup = lookup_timestamp_offsets(consumer, topic, partitions, params.timestamp, setup)
     plan = plan_start_offsets(
         params.start,

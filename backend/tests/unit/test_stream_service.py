@@ -7,6 +7,7 @@ from confluent_kafka import OFFSET_END, KafkaError, KafkaException
 from pydantic import ValidationError
 
 from kafka_web.errors import BrokerError, NotFound, ValidationFailed
+from kafka_web.services import stream as stream_service
 from kafka_web.services.consume import validate_start
 from kafka_web.services.decode import MessageView, to_message_view
 from kafka_web.services.stream import BoundedDropQueue, StreamParams, StreamWorker
@@ -404,3 +405,88 @@ def test_consumer_creation_failure_is_reported() -> None:
 
     assert not worker.is_alive()
     assert isinstance(worker.error, BrokerError)
+
+
+# --- setup honours stop -----------------------------------------------------------------------
+
+
+def wait_for_metadata_call(consumers: LiveConsumers) -> LiveFakeConsumer:
+    consumer = consumers.wait_for_consumer()
+    deadline = time.monotonic() + 2
+    while not consumer.metadata_call_times:
+        assert time.monotonic() < deadline, "setup never asked for metadata"
+        time.sleep(0.01)
+    return consumer
+
+
+def test_stop_during_a_hanging_setup_ends_the_worker_within_about_a_second() -> None:
+    consumers = LiveConsumers(hanging_metadata_calls=1000)  # a paused broker
+    worker, _, stop = start_worker(consumers)
+    consumer = wait_for_metadata_call(consumers)
+
+    began = time.monotonic()
+    stop.set()
+    worker.join(timeout=3)
+    elapsed = time.monotonic() - began
+
+    assert not worker.is_alive()
+    assert elapsed < stream_service.SETUP_SLICE_S + 0.3
+    assert consumer.closed
+    assert consumer.assigned is None
+    assert worker.error is None  # stopping is not a failure
+    assert all(
+        t is not None and t <= stream_service.SETUP_SLICE_S for t in consumer.metadata_timeouts
+    )
+
+
+def test_setup_retries_timed_out_slices_within_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(stream_service, "SETUP_SLICE_S", 0.1)
+    consumers = LiveConsumers(hanging_metadata_calls=3)
+    worker, _, stop = start_worker(consumers)
+
+    consumer = started(consumers)
+    stopped(worker, stop)
+
+    assert len(consumer.metadata_timeouts) == 4
+    assert all(t == pytest.approx(0.1) for t in consumer.metadata_timeouts)
+    assert consumer.assigned == [(0, OFFSET_END)]
+
+
+def test_setup_gives_up_when_its_budget_is_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stream_service, "SETUP_SLICE_S", 0.1)
+    monkeypatch.setattr(stream_service, "SETUP_BUDGET_S", 0.35)
+    consumers = LiveConsumers(hanging_metadata_calls=1000)
+    worker, _, _ = start_worker(consumers)
+
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert worker.error is not None
+    assert worker.error.code == "kafka_timeout"
+    assert consumers.created[0].closed
+
+
+def test_instantly_failing_setup_calls_do_not_spin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(stream_service, "SETUP_SLICE_S", 0.1)
+    monkeypatch.setattr(stream_service, "SETUP_BUDGET_S", 0.35)
+    consumers = LiveConsumers(failing_metadata_calls=1000)  # brokers refuse connections
+    worker, _, _ = start_worker(consumers)
+
+    worker.join(timeout=2)
+
+    consumer = consumers.created[0]
+    assert len(consumer.metadata_call_times) <= 5  # about one attempt per slice
+    assert worker.error is not None
+    assert worker.error.code == "broker_unreachable"
+
+
+def test_setup_errors_that_retrying_cannot_fix_are_not_retried() -> None:
+    consumers = LiveConsumers()
+    worker, _, _ = start_worker(consumers, topic="missing")
+    worker.join(timeout=2)
+
+    assert worker.error is not None
+    assert worker.error.code == "topic_not_found"
+    assert len(consumers.created[0].metadata_call_times) == 1

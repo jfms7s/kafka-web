@@ -184,6 +184,22 @@ def test_stream_stops_on_client_disconnect(client: TestClient, consumers: LiveCo
     assert within(2, lambda: active_streams(client) == 0), "stream still registered"
 
 
+def test_client_leaving_during_a_hanging_setup_stops_the_worker_promptly(
+    client: TestClient, consumers: LiveConsumers
+) -> None:
+    consumers.consumer_kwargs["hanging_metadata_calls"] = 1000  # a paused broker
+    with client.websocket_connect(URL):
+        consumer = consumers.wait_for_consumer()
+        assert within(2, lambda: bool(consumer.metadata_call_times))
+        left_at = time.monotonic()
+
+    assert consumer.closed_event.wait(2)
+    assert no_stream_threads_within(2)
+    assert time.monotonic() - left_at < 1.6  # about one setup slice, not the 10 s budget
+    assert consumer.assigned is None
+    assert within(2, lambda: active_streams(client) == 0)
+
+
 @pytest.mark.parametrize(
     "change",
     [

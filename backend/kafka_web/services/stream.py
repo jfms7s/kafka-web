@@ -31,6 +31,11 @@ from kafka_web.services.offsets import plan_start_offsets
 
 QUEUE_SIZE = 1000
 POLL_INTERVAL_S = 0.5
+# Setup calls (metadata, watermarks, offsets-for-times) share SETUP_BUDGET_S, but each attempt
+# waits at most SETUP_SLICE_S and timed-out attempts are retried: between slices the stop event
+# is checked, so a client leaving during a slow setup is honoured within about a second.
+SETUP_SLICE_S = 1.0
+_RETRYABLE_SETUP_CODES = {"kafka_timeout", "broker_unreachable"}
 # Client-level errors (broker connections, authentication) never come out of `poll()`: librdkafka
 # hands them to the `error_cb`, which it calls while serving `poll()` on the worker thread. These
 # end the stream; anything else (e.g. one `_TRANSPORT` disconnect, which librdkafka retries by
@@ -53,6 +58,23 @@ class StreamParams(BaseModel):
     offset: int | None = None  # start == "offset": required, and so is `partition`
     timestamp: int | None = Field(None, ge=0)  # start == "timestamp": required (epoch ms)
     partition: int | None = None
+
+
+class _Stopped(Exception):
+    """The stop event was set during setup: not a failure."""
+
+
+class _SlicedBudget(Budget):
+    """The setup budget, handed out in slices of at most SETUP_SLICE_S; stops when told to."""
+
+    def __init__(self, stop: threading.Event):
+        super().__init__(SETUP_BUDGET_S, time.monotonic)
+        self._stop = stop
+
+    def call_timeout(self) -> float:
+        if self._stop.is_set():
+            raise _Stopped
+        return min(SETUP_SLICE_S, super().call_timeout())
 
 
 class BoundedDropQueue[T]:
@@ -117,6 +139,8 @@ class StreamWorker(threading.Thread):
         try:
             if self._assign(consumer):
                 self._poll(consumer)
+        except _Stopped:
+            pass
         except Exception as exc:
             self.error = map_kafka_exception(exc)
         finally:
@@ -139,19 +163,25 @@ class StreamWorker(threading.Thread):
             logger.info("Live stream on %r: client error %s", self._topic, err.name())
 
     def _assign(self, consumer: Consumer) -> bool:
-        """Assign the start positions; False when stopped during setup."""
-        budget = Budget(SETUP_BUDGET_S, time.monotonic)
-        params = self._params
-        partitions = partition_ids(consumer, self._topic, params.partition, budget)
+        """Assign the start positions; False (or `_Stopped`) when stopped during setup."""
+        budget = _SlicedBudget(self.stop_event)
+        params, topic = self._params, self._topic
+        partitions = self._retrying(
+            lambda b: partition_ids(consumer, topic, params.partition, b), budget
+        )
         if params.start == "latest":
             starts = dict.fromkeys(partitions, OFFSET_END)
         else:
-            marks = fetch_watermarks(consumer, self._topic, partitions, budget)
+            marks = self._retrying(
+                lambda b: fetch_watermarks(consumer, topic, partitions, b), budget
+            )
             lookup = None
             if params.start == "timestamp":
-                assert params.timestamp is not None  # validate_start
-                lookup = lookup_timestamp_offsets(
-                    consumer, self._topic, partitions, params.timestamp, budget
+                timestamp = params.timestamp
+                assert timestamp is not None  # validate_start
+                lookup = self._retrying(
+                    lambda b: lookup_timestamp_offsets(consumer, topic, partitions, timestamp, b),
+                    budget,
                 )
             plan = plan_start_offsets(
                 params.start, marks, 0, offset=params.offset, timestamp_offsets=lookup
@@ -162,9 +192,29 @@ class StreamWorker(threading.Thread):
             starts = {p: plan.get(p, high) for p, (_, high) in marks.items()}
         if self.stop_event.is_set():
             return False
-        tps = [TopicPartition(self._topic, p, offset) for p, offset in starts.items()]
+        tps = [TopicPartition(topic, p, offset) for p, offset in starts.items()]
         call_with_timeout(lambda: consumer.assign(tps))
         return True
+
+    def _retrying[T](self, call: Callable[[Budget], T], budget: _SlicedBudget) -> T:
+        """Run one setup step, retrying timeouts / unreachable brokers until the budget is spent.
+
+        Raises `_Stopped` as soon as a stop is noticed (between slices, at most about a slice).
+        """
+        while True:
+            began = time.monotonic()
+            try:
+                return call(budget)
+            except AppError as exc:
+                if exc.code not in _RETRYABLE_SETUP_CODES:
+                    raise
+                failure = exc
+            # Sit out the rest of the slice, so an instantly failing call does not spin; a stop
+            # ends the wait at once.
+            if self.stop_event.wait(max(0.0, SETUP_SLICE_S - (time.monotonic() - began))):
+                raise _Stopped
+            if budget.remaining() <= 0:
+                raise failure  # the last real cause, not just "out of time"
 
     def _poll(self, consumer: Consumer) -> None:
         while not self.stop_event.is_set():
