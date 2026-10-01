@@ -92,25 +92,39 @@ def _start(env: dict[str, str], ports: list[int], files: dict[str, bytes]) -> Do
         raise
 
 
+def _plaintext_env(port: int) -> dict[str, str]:
+    return {
+        "KAFKA_LISTENERS": f"PLAINTEXT://:{port},CONTROLLER://:9093",
+        "KAFKA_ADVERTISED_LISTENERS": f"PLAINTEXT://localhost:{port}",
+        "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
+    }
+
+
 @pytest.fixture(scope="session")
 def kafka_plaintext() -> Iterator[str]:
     """Bootstrap servers (`localhost:<port>`) of a PLAINTEXT broker."""
     [port] = _free_ports(1)
-    container = _start(
-        {
-            "KAFKA_LISTENERS": f"PLAINTEXT://:{port},CONTROLLER://:9093",
-            "KAFKA_ADVERTISED_LISTENERS": f"PLAINTEXT://localhost:{port}",
-            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
-        },
-        [port],
-        {},
-    )
+    container = _start(_plaintext_env(port), [port], {})
     try:
         bootstrap = f"localhost:{port}"
         _wait_ready(container, {"bootstrap.servers": bootstrap})
         yield bootstrap
     finally:
         container.stop()
+
+
+@pytest.fixture
+def disposable_kafka() -> Iterator[tuple[str, DockerContainer]]:
+    """`(bootstrap, container)` of a PLAINTEXT broker of the test's own, which it may stop."""
+    [port] = _free_ports(1)
+    container = _start(_plaintext_env(port), [port], {})
+    try:
+        bootstrap = f"localhost:{port}"
+        _wait_ready(container, {"bootstrap.servers": bootstrap})
+        yield bootstrap, container
+    finally:
+        with contextlib.suppress(Exception):  # already stopped and removed by the test
+            container.stop()
 
 
 def broker_pem(certs: CertBundle) -> bytes:

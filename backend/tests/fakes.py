@@ -1,6 +1,8 @@
 """Recording fakes for confluent-kafka clients, injected through ConnectionRegistry factories."""
 
+import queue
 import threading
+import time
 from typing import Any
 
 
@@ -270,3 +272,103 @@ class FakeConsumer:
     def close(self) -> None:
         self.calls.append("close")
         self.closed = True
+
+
+class ErrorEvent:
+    """A client-level error (broker connection, authentication): librdkafka hands these to the
+    `error_cb` while serving `poll()`, never as a polled message."""
+
+    def __init__(self, err: Any):
+        self.err = err
+
+
+class LiveFakeConsumer(FakeConsumer):
+    """FakeConsumer for a consumer thread: `poll` really waits, so an idle loop does not spin.
+
+    `feed(...)` hands items to the next polls: messages, per-message error events, exceptions to
+    raise, or `ErrorEvent`s, which are passed to the configured `error_cb` (the poll returns None).
+    `assigned_event` / `closed_event` let a test wait for the worker instead of sleeping.
+    """
+
+    def __init__(
+        self,
+        conf: dict[str, Any],
+        *,
+        hanging_metadata_calls: int = 0,
+        failing_metadata_calls: int = 0,
+        **kwargs: Any,
+    ):
+        super().__init__(conf, clock=FakeClock(), **kwargs)
+        # A paused broker: these many metadata calls block for their whole timeout, then time out.
+        self.hanging_metadata_calls = hanging_metadata_calls
+        # An unreachable one: these many metadata calls fail at once.
+        self.failing_metadata_calls = failing_metadata_calls
+        self.metadata_call_times: list[float] = []
+        self._inbox: queue.Queue[Any] = queue.Queue()
+        self.assigned_event = threading.Event()
+        self.closed_event = threading.Event()
+
+    def feed(self, *items: Any) -> None:
+        for item in items:
+            self._inbox.put(item)
+
+    def list_topics(self, topic: str | None = None, timeout: float | None = None):
+        from confluent_kafka import KafkaError, KafkaException
+
+        self.metadata_call_times.append(time.monotonic())
+        if self.hanging_metadata_calls > 0:
+            self.hanging_metadata_calls -= 1
+            self.metadata_timeouts.append(timeout)
+            threading.Event().wait(timeout)
+            raise KafkaException(KafkaError(KafkaError._TIMED_OUT))
+        if self.failing_metadata_calls > 0:
+            self.failing_metadata_calls -= 1
+            self.metadata_timeouts.append(timeout)
+            raise KafkaException(KafkaError(KafkaError._TRANSPORT))
+        return super().list_topics(topic, timeout)
+
+    def assign(self, tps) -> None:
+        super().assign(tps)
+        self.assigned_event.set()
+
+    def poll(self, timeout: float | None = None):
+        self.calls.append("poll")
+        assert timeout is not None
+        self.poll_timeouts.append(timeout)
+        try:
+            item = self._inbox.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if isinstance(item, BaseException):
+            raise item
+        if isinstance(item, ErrorEvent):
+            self.conf["error_cb"](item.err)
+            return None
+        return item
+
+    def close(self) -> None:
+        super().close()
+        self.closed_event.set()
+
+
+class LiveConsumers:
+    """A consumer factory recording every `LiveFakeConsumer` it creates."""
+
+    def __init__(self, **consumer_kwargs: Any):
+        self.created: list[LiveFakeConsumer] = []
+        self.consumer_kwargs = consumer_kwargs
+        self.error: Exception | None = None  # raised by the factory instead of creating one
+
+    def __call__(self, conf: dict[str, Any]) -> LiveFakeConsumer:
+        if self.error is not None:
+            raise self.error
+        consumer = LiveFakeConsumer(conf, **self.consumer_kwargs)
+        self.created.append(consumer)
+        return consumer
+
+    def wait_for_consumer(self, timeout: float = 2.0) -> LiveFakeConsumer:
+        deadline = time.monotonic() + timeout
+        while not self.created:
+            assert time.monotonic() < deadline, "no consumer was created"
+            time.sleep(0.01)
+        return self.created[-1]

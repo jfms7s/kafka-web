@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { MessageView } from '../api/hooks/messages'
 import { formatTimestamp, messageId } from './decoded'
 import { DecodedPreview, DecodedValue } from './DecodedValue'
@@ -42,11 +42,17 @@ function Detail({ message }: { message: MessageView }) {
   )
 }
 
+interface MessageTableProps {
+  messages: readonly MessageView[]
+  /** Keep the newest (last) message in view whenever `messages` changes. */
+  followTail?: boolean
+}
+
 /**
  * A virtualized, presentation-only table of messages; clicking a row expands its detail.
  * Which rows are expanded is the only state it owns, so any message source can feed it.
  */
-export function MessageTable({ messages }: { messages: readonly MessageView[] }) {
+export function MessageTable({ messages, followTail = false }: MessageTableProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
 
@@ -57,6 +63,13 @@ export function MessageTable({ messages }: { messages: readonly MessageView[] })
     getItemKey: (index) => messageId(messages[index]),
     overscan: 8,
   })
+
+  // Keyed on the array, not its length: a full live buffer keeps its length while it rolls.
+  useEffect(() => {
+    if (followTail && messages.length > 0) {
+      virtualizer.scrollToIndex(messages.length - 1, { align: 'end' })
+    }
+  }, [followTail, messages, virtualizer])
 
   const toggle = (id: string) =>
     setExpanded((current) => {

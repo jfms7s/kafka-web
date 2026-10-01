@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kafka_web.api.app import create_app
-from kafka_web.api.security import is_local_origin
+from kafka_web.api.security import is_same_origin
 from kafka_web.config.secrets import SecretStore
 from kafka_web.config.store import ClusterStore
 from kafka_web.kafka.registry import ConnectionRegistry
@@ -33,41 +33,64 @@ def app(store: ClusterStore, fakes: Fakes):
 
 
 @pytest.mark.parametrize(
-    "origin",
+    ("origin", "host", "scheme"),
     [
-        None,
-        "http://127.0.0.1",
-        "http://127.0.0.1:8000",
-        "http://localhost:5173",
-        "https://localhost",
-        "https://127.0.0.1:8443",
-        "HTTP://LOCALHOST:5173",
+        (None, "127.0.0.1:8000", "http"),  # curl and other non-browser clients send none
+        (None, None, "http"),
+        ("http://127.0.0.1:8000", "127.0.0.1:8000", "http"),  # the built app
+        ("http://127.0.0.1:5173", "127.0.0.1:5173", "http"),  # Vite proxy keeps the Host
+        ("http://localhost:5173", "localhost:5173", "http"),
+        ("HTTP://LOCALHOST:5173", "LocalHost:5173", "http"),
+        ("http://127.0.0.1", "127.0.0.1", "http"),
+        ("http://127.0.0.1:80", "127.0.0.1", "http"),
+        ("http://127.0.0.1", "127.0.0.1:80", "http"),
+        ("https://localhost", "localhost:443", "https"),
+        ("http://127.0.0.1:8000", "127.0.0.1:8000", "ws"),  # WebSocket handshake
+        ("https://127.0.0.1:8443", "127.0.0.1:8443", "wss"),
     ],
 )
-def test_local_origins(origin: str | None):
-    assert is_local_origin(origin)
+def test_same_origins(origin: str | None, host: str | None, scheme: str):
+    assert is_same_origin(origin, host, scheme)
 
 
 @pytest.mark.parametrize(
-    "origin",
+    ("origin", "host", "scheme"),
     [
-        "null",
-        "",
-        "http://evil.example",
-        "http://localhost.evil.example",
-        "http://127.0.0.1.evil.example:8000",
-        "http://evil.example:8000",
-        "ftp://localhost",
-        "http://user@localhost:5173",
-        "http://localhost:notaport",
-        "http://localhost:99999",
-        "http://[::1]:8000",
-        "localhost:5173",
-        "http://localhost:5173/path",
+        # another local process (dev server, notebook) on another port is another origin
+        ("http://127.0.0.1:5173", "127.0.0.1:8000", "http"),
+        ("http://localhost:8888", "localhost:8000", "http"),
+        ("http://127.0.0.1:8000", "127.0.0.1:8001", "ws"),
+        ("http://127.0.0.1", "127.0.0.1:8000", "http"),
+        # localhost and 127.0.0.1 are different origins
+        ("http://localhost:8000", "127.0.0.1:8000", "http"),
+        ("http://127.0.0.1:8000", "localhost:8000", "ws"),
+        # scheme mismatch
+        ("https://127.0.0.1:8000", "127.0.0.1:8000", "http"),
+        ("http://127.0.0.1:8000", "127.0.0.1:8000", "wss"),
+        ("http://localhost", "localhost", "https"),
+        # same origin, but not a local host
+        ("http://evil.example:8000", "evil.example:8000", "http"),
+        # no Host to compare with
+        ("http://127.0.0.1:8000", None, "http"),
+        ("http://127.0.0.1:8000", "127.0.0.1:notaport", "http"),
+        # malformed or opaque Origins
+        ("null", "127.0.0.1:8000", "http"),
+        ("", "127.0.0.1:8000", "http"),
+        ("http://evil.example", "127.0.0.1:8000", "http"),
+        ("http://localhost.evil.example", "localhost", "http"),
+        ("http://127.0.0.1.evil.example:8000", "127.0.0.1:8000", "http"),
+        ("ftp://localhost", "localhost", "http"),
+        ("http://user@localhost:5173", "localhost:5173", "http"),
+        ("http://localhost:notaport", "localhost", "http"),
+        ("http://localhost:99999", "localhost", "http"),
+        ("http://[::1]:8000", "[::1]:8000", "http"),
+        ("localhost:5173", "localhost:5173", "http"),
+        ("http://localhost:5173/path", "localhost:5173", "http"),
+        ("file://", "127.0.0.1:8000", "http"),
     ],
 )
-def test_foreign_origins(origin: str):
-    assert not is_local_origin(origin)
+def test_cross_origins(origin: str, host: str | None, scheme: str):
+    assert not is_same_origin(origin, host, scheme)
 
 
 @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "localhost:8000", "127.0.0.1:5173"])
@@ -121,12 +144,32 @@ def test_null_origin_is_403(app):
     assert response.status_code == 403
 
 
-def test_vite_dev_origin_is_allowed(app):
+def test_same_origin_write_is_allowed(app):
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         response = client.post(
-            "/api/clusters", json=BODY, headers={"Origin": "http://localhost:5173"}
+            "/api/clusters", json=BODY, headers={"Origin": "http://127.0.0.1:8000"}
         )
     assert response.status_code == 201
+
+
+def test_vite_dev_proxy_write_is_allowed(app):
+    """vite.config.ts proxies /api with changeOrigin=false: the Host stays 127.0.0.1:5173."""
+    with TestClient(app, base_url="http://127.0.0.1:5173") as client:
+        response = client.post(
+            "/api/clusters", json=BODY, headers={"Origin": "http://127.0.0.1:5173"}
+        )
+    assert response.status_code == 201
+
+
+@pytest.mark.parametrize(
+    "origin", ["http://127.0.0.1:5173", "http://localhost:8000", "http://127.0.0.1:8888"]
+)
+def test_write_from_another_local_origin_is_403(app, origin: str, store: ClusterStore):
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/clusters", json=BODY, headers={"Origin": origin})
+    assert response.status_code == 403
+    assert response.json()["code"] == "forbidden_origin"
+    assert store.list() == []
 
 
 def test_no_origin_is_allowed(app):
