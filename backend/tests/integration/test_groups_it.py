@@ -191,7 +191,7 @@ def test_active_group_refuses_reset_and_delete_until_stopped(
     member = active_member(group_id, topic)
     stable = wait_for_state(api, cluster, group_id, "stable")
     assert len(stable["members"]) == 1
-    assert stable["members"][0]["assignments"] == [[topic, 0]]
+    assert stable["members"][0]["assignments"] == [{"topic": topic, "partition": 0}]
 
     blocked_reset = reset(api, cluster, group_id, topic, "latest")
     blocked_delete = api.delete(
