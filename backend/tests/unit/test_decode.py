@@ -1,45 +1,9 @@
 from typing import Any
 
-from confluent_kafka import (
-    TIMESTAMP_CREATE_TIME,
-    TIMESTAMP_LOG_APPEND_TIME,
-    TIMESTAMP_NOT_AVAILABLE,
-)
+from confluent_kafka import TIMESTAMP_LOG_APPEND_TIME, TIMESTAMP_NOT_AVAILABLE
 
 from kafka_web.services.decode import decode_bytes, to_message_view
-
-
-class FakeMessage:
-    def __init__(
-        self,
-        *,
-        partition: int = 0,
-        offset: int = 0,
-        timestamp: tuple[int, int] = (TIMESTAMP_CREATE_TIME, 1_700_000_000_000),
-        key: bytes | None = None,
-        value: bytes | None = None,
-        headers: list[tuple[str, bytes | None]] | None = None,
-    ):
-        self._p, self._o, self._ts = partition, offset, timestamp
-        self._k, self._v, self._h = key, value, headers
-
-    def partition(self) -> int:
-        return self._p
-
-    def offset(self) -> int:
-        return self._o
-
-    def timestamp(self) -> tuple[int, int]:
-        return self._ts
-
-    def key(self) -> bytes | None:
-        return self._k
-
-    def value(self) -> bytes | None:
-        return self._v
-
-    def headers(self) -> list[tuple[str, bytes | None]] | None:
-        return self._h
+from tests.fakes import FakeMessage
 
 
 def test_none_decodes_to_null() -> None:
