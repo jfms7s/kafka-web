@@ -12,12 +12,13 @@ from datetime import datetime
 
 import jks
 from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.serialization import Encoding, pkcs12
 
 from kafka_web.errors import ValidationFailed
 
 _JKS_MAGICS = (b"\xfe\xed\xfe\xed", b"\xce\xce\xce\xce")
-_PEM_CERT_MARKER = re.compile(rb"-----BEGIN (?:X509 |TRUSTED )?CERTIFICATE-----")
+_PEM_CERT_MARKER = re.compile(rb"-----BEGIN (?:X509 )?CERTIFICATE-----")
 
 
 class TruststoreError(ValidationFailed):
@@ -36,7 +37,7 @@ class CertSummary:
 def truststore_b64_to_pem(b64: str, password: str | None) -> str:
     try:
         data = base64.b64decode("".join(b64.split()), validate=True)
-    except binascii.Error as exc:
+    except (binascii.Error, ValueError) as exc:  # ValueError: non-ASCII input
         raise TruststoreError(
             "Truststore is not valid base64", code="truststore_invalid_base64"
         ) from exc
@@ -77,16 +78,17 @@ def _certs_from_jks(data: bytes, password: str | None) -> list[x509.Certificate]
         # unencrypted, so they are readable without it. Key entries are not needed (and not
         # decrypted): only trusted certificates belong in a truststore.
         store = jks.KeyStore.loads(data, password, try_decrypt_keys=False)
+        return [x509.load_der_x509_certificate(entry.cert) for entry in store.certs.values()]
     except jks.KeystoreSignatureException as exc:
         raise TruststoreError(
             "Incorrect truststore password", code="truststore_invalid_password"
         ) from exc
-    except jks.KeystoreException as exc:
+    except Exception as exc:
+        # pyjks and cryptography leak many exception shapes (struct, ValueError, ...) on corrupt
+        # input. Never echo their text: it could contain data from the store.
         raise TruststoreError(
-            f"Unreadable JKS/JCEKS truststore ({type(exc).__name__})",
-            code="truststore_unrecognized_format",
+            "Unreadable JKS/JCEKS truststore", code="truststore_unrecognized_format"
         ) from exc
-    return [x509.load_der_x509_certificate(entry.cert) for entry in store.certs.values()]
 
 
 def _certs_from_pem(data: bytes) -> list[x509.Certificate]:
@@ -103,6 +105,13 @@ def _certs_from_pem(data: bytes) -> list[x509.Certificate]:
 def _certs_from_der(data: bytes, password: str | None) -> list[x509.Certificate]:
     try:
         bundle = pkcs12.load_pkcs12(data, password.encode() if password else None)
+    except UnsupportedAlgorithm as exc:
+        raise TruststoreError(
+            "Truststore uses an encryption algorithm that is not supported (typically legacy "
+            "RC2 PKCS12 from an old Java keytool); re-export it with modern (AES) encryption "
+            "or as PEM/JKS",
+            code="truststore_unrecognized_format",
+        ) from exc
     except ValueError as exc:
         if "password" in str(exc).lower():
             raise _password_error(password) from exc

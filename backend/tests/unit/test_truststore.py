@@ -5,7 +5,9 @@ import textwrap
 import jks
 import pytest
 from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.serialization import pkcs12
 
 from kafka_web.config.truststore import (
     CertSummary,
@@ -223,3 +225,77 @@ def test_error_message_never_contains_password(certs):
 
         assert secret not in str(exc.value)
         assert secret not in exc.value.message
+
+
+def test_b64_non_ascii_is_invalid_base64():
+    with pytest.raises(TruststoreError) as exc:
+        truststore_b64_to_pem("é==", None)
+
+    assert exc.value.code == "truststore_invalid_base64"
+    assert exc.value.field == "truststore"
+
+
+@pytest.mark.parametrize("password", ["changeit", None])
+def test_jks_with_unparseable_cert_entry(password):
+    store = jks.KeyStore.new("jks", [jks.TrustedCertEntry.new("bad", b"notacert")])
+
+    with pytest.raises(TruststoreError) as exc:
+        truststore_to_pem(store.saves("changeit"), password)
+
+    assert exc.value.code == "truststore_unrecognized_format"
+    assert exc.value.field == "truststore"
+
+
+def test_every_truncation_of_a_jks_is_a_truststore_error(certs):
+    data = make_jks([certs.ca_cert], "changeit")
+
+    for password in (None, "changeit"):
+        for cut in range(len(data) - 1):
+            try:
+                truststore_to_pem(data[:cut], password)
+            except TruststoreError:
+                continue
+            except Exception as exc:
+                pytest.fail(f"truncation at {cut} (password={password!r}) leaked {exc!r}")
+
+
+@pytest.mark.filterwarnings("ignore::cryptography.utils.CryptographyDeprecationWarning")
+def test_every_single_byte_corruption_of_a_jks_is_a_truststore_error(certs):
+    data = make_jks([certs.ca_cert], "changeit")
+
+    for password in (None, "changeit"):
+        for pos in range(len(data)):
+            mutated = data[:pos] + bytes([data[pos] ^ 0xFF]) + data[pos + 1 :]
+            try:
+                truststore_to_pem(mutated, password)
+            except TruststoreError:
+                continue
+            except Exception as exc:
+                pytest.fail(f"corruption at {pos} (password={password!r}) leaked {exc!r}")
+
+
+def test_pkcs12_with_unsupported_legacy_encryption(monkeypatch):
+    # Older Java keytool writes RC2-40 PKCS12; OpenSSL 3 rejects it unless the legacy provider is
+    # loaded. Simulated here because a real RC2 file cannot be produced with the installed tools.
+    def raise_unsupported(*args, **kwargs):
+        raise UnsupportedAlgorithm("RC2 is disabled")
+
+    monkeypatch.setattr(pkcs12, "load_pkcs12", raise_unsupported)
+
+    with pytest.raises(TruststoreError) as exc:
+        truststore_to_pem(b"\x30\x03abc", "changeit")
+
+    assert exc.value.code == "truststore_unrecognized_format"
+    assert "AES" in exc.value.message
+    assert exc.value.field == "truststore"
+
+
+def test_pem_with_only_trusted_certificate_block_is_empty():
+    # cryptography cannot parse OpenSSL's "TRUSTED CERTIFICATE" blocks, so they do not count.
+    with pytest.raises(TruststoreError) as exc:
+        truststore_to_pem(
+            b"-----BEGIN TRUSTED CERTIFICATE-----\nAAAA\n-----END TRUSTED CERTIFICATE-----\n",
+            None,
+        )
+
+    assert exc.value.code == "truststore_empty"
