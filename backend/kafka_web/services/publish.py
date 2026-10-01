@@ -263,10 +263,20 @@ def _kwargs(message: OutMessage, delivery: _Delivery) -> dict[str, Any]:
     return kwargs
 
 
+def _describe(exc: Exception) -> str:
+    """The text of a produce-time failure, without credentials."""
+    if isinstance(exc, KafkaException) and exc.args and isinstance(exc.args[0], KafkaError):
+        text = exc.args[0].str()
+    else:
+        text = str(exc)
+    return redact(text) or type(exc).__name__
+
+
 def _produce(
-    producer: Producer, topic: str, message: OutMessage, delivery: _Delivery, deadline: float
+    producer: Producer, topic: str, message: OutMessage, delivery: _Delivery, patience: float
 ) -> None:
-    """Queue one message, waiting out a full local queue until `deadline`."""
+    """Queue one message, waiting up to `patience` seconds for room in a full local queue."""
+    deadline = time.monotonic() + patience
     while True:
         try:
             producer.produce(topic, **_kwargs(message, delivery))
@@ -276,8 +286,7 @@ def _produce(
                 return
             producer.poll(_QUEUE_FULL_POLL_S)
         except (KafkaException, ValueError, TypeError) as exc:
-            detail = exc.args[0].str() if isinstance(exc, KafkaException) else str(exc)
-            delivery.fail(redact(str(detail)) or type(exc).__name__, exc)
+            delivery.fail(_describe(exc), exc)
             return
         else:
             delivery.queued = True
@@ -288,9 +297,8 @@ def _send(
     producer: Producer, topic: str, messages: Sequence[OutMessage], flush_timeout: float
 ) -> list[_Delivery]:
     deliveries = [_Delivery() for _ in messages]
-    deadline = time.monotonic() + flush_timeout
     for message, delivery in zip(messages, deliveries, strict=True):
-        _produce(producer, topic, message, delivery, deadline)
+        _produce(producer, topic, message, delivery, flush_timeout)
         producer.poll(0)  # serve delivery reports as we go
     unflushed = producer.flush(flush_timeout)
     if unflushed == 0:

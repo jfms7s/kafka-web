@@ -117,6 +117,15 @@ def test_a_produce_time_failure_fails_only_that_row() -> None:
     assert "large" in (result.results[0].error or "").lower()
 
 
+def test_a_produce_time_exception_without_a_kafka_error_still_fails_just_that_row() -> None:
+    producer = DeliveringProducer(produce_errors={0: KafkaException("plain text")})
+
+    result = publish(producer, "orders", [msg("a"), msg("b")])
+
+    assert [r.ok for r in result.results] == [False, True]
+    assert "plain text" in (result.results[0].error or "")
+
+
 def test_a_report_served_by_another_thread_after_flush_still_counts() -> None:
     # flush() returned 0 (queue empty) but this message's callback has not run yet.
     producer = DeliveringProducer(late={0})

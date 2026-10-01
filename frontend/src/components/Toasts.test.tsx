@@ -9,6 +9,11 @@ function Trigger({ error }: { error: unknown }) {
   return <button onClick={() => toast.error(error)}>fire</button>
 }
 
+function Celebrate({ message }: { message: string }) {
+  const toast = useToast()
+  return <button onClick={() => toast.success(message)}>celebrate</button>
+}
+
 afterEach(() => vi.useRealTimers())
 
 describe('Toasts', () => {
@@ -56,5 +61,18 @@ describe('Toasts', () => {
     expect(screen.getByRole('alert')).toBeInTheDocument()
     act(() => vi.advanceTimersByTime(10_000))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows a success message as a status, not an alert', async () => {
+    render(
+      <ToastProvider>
+        <Celebrate message="Published to partition 1" />
+      </ToastProvider>,
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'celebrate' }))
+    expect(screen.getByRole('status')).toHaveTextContent('Published to partition 1')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 })
