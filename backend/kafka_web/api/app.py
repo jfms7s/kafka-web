@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import Response
+from starlette.types import Scope
 
 from kafka_web.api import clusters
 from kafka_web.api.security import LOCAL_HOSTS, LocalOriginMiddleware
@@ -68,6 +70,25 @@ async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     return _error(500, "internal_error", "Internal server error")
 
 
+class SpaStaticFiles(StaticFiles):
+    """Serve the built frontend; unknown client-side routes get `index.html`.
+
+    `/api/...` and `/assets/...` misses stay genuine 404s: an unknown API path must not come
+    back as HTML, and a missing hashed asset must not be mistaken for the app shell.
+    """
+
+    _NO_FALLBACK_PREFIXES = ("api", "assets")
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            first_segment = path.split("/", 1)[0]
+            if exc.status_code != 404 or first_segment in self._NO_FALLBACK_PREFIXES:
+                raise
+            return await super().get_response("index.html", scope)
+
+
 def create_app(
     *,
     store: ClusterStore | None = None,
@@ -97,5 +118,5 @@ def create_app(
 
     app.include_router(clusters.router, prefix="/api")
     if static_dir is not None:
-        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+        app.mount("/", SpaStaticFiles(directory=static_dir, html=True), name="static")
     return app
