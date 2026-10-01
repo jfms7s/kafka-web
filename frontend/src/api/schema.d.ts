@@ -146,6 +146,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/clusters/{name}/topics/{topic}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Snapshot Messages */
+        get: operations["snapshot_messages_api_clusters__name__topics__topic__messages_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -275,10 +292,53 @@ export interface components {
             /** Active Streams */
             active_streams: number;
         };
+        /** Decoded */
+        Decoded: {
+            /**
+             * Encoding
+             * @enum {string}
+             */
+            encoding: "utf-8" | "base64" | "null";
+            /** Data */
+            data: string | null;
+            /** Is Json */
+            is_json: boolean;
+            /** Json Value */
+            json_value?: unknown;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** HeaderView */
+        HeaderView: {
+            /** Key */
+            key: string;
+            value: components["schemas"]["Decoded"];
+        };
+        /** MessageListView */
+        MessageListView: {
+            /** Messages */
+            messages: components["schemas"]["MessageView"][];
+        };
+        /** MessageView */
+        MessageView: {
+            /** Partition */
+            partition: number;
+            /** Offset */
+            offset: number;
+            /** Timestamp */
+            timestamp: number | null;
+            /**
+             * Timestamp Type
+             * @enum {string}
+             */
+            timestamp_type: "create" | "log_append" | "none";
+            key: components["schemas"]["Decoded"];
+            value: components["schemas"]["Decoded"];
+            /** Headers */
+            headers: components["schemas"]["HeaderView"][];
         };
         /** PartitionView */
         PartitionView: {
@@ -658,6 +718,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TopicConfigView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    snapshot_messages_api_clusters__name__topics__topic__messages_get: {
+        parameters: {
+            query?: {
+                count?: number;
+                timeout?: number;
+                start?: "earliest" | "latest" | "offset" | "timestamp";
+                offset?: number | null;
+                timestamp?: number | null;
+                partition?: number | null;
+            };
+            header?: never;
+            path: {
+                name: string;
+                topic: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageListView"];
                 };
             };
             /** @description Validation Error */

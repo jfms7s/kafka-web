@@ -106,3 +106,167 @@ class FakeTopicAdmin:
                 future.set_result(self.configs.get(resource.name, {}))
             out[resource] = future
         return out
+
+
+class FakeMessage:
+    """A `confluent_kafka.Message` stand-in; `error` makes it a per-message error event."""
+
+    def __init__(
+        self,
+        *,
+        partition: int = 0,
+        offset: int = 0,
+        timestamp: tuple[int, int] | None = None,
+        key: bytes | None = None,
+        value: bytes | None = None,
+        headers: list[tuple[str, bytes | None]] | None = None,
+        error=None,
+    ):
+        from confluent_kafka import TIMESTAMP_CREATE_TIME
+
+        self._p, self._o, self._k, self._v, self._h = partition, offset, key, value, headers
+        self._ts = (
+            timestamp if timestamp is not None else (TIMESTAMP_CREATE_TIME, 1_700_000_000_000)
+        )
+        self._error = error
+
+    def partition(self) -> int:
+        return self._p
+
+    def offset(self) -> int:
+        return self._o
+
+    def timestamp(self) -> tuple[int, int]:
+        return self._ts
+
+    def key(self) -> bytes | None:
+        return self._k
+
+    def value(self) -> bytes | None:
+        return self._v
+
+    def headers(self) -> list[tuple[str, bytes | None]] | None:
+        return self._h
+
+    def error(self):
+        return self._error
+
+
+def eof(partition: int, offset: int = 0) -> FakeMessage:
+    from confluent_kafka import KafkaError
+
+    return FakeMessage(
+        partition=partition, offset=offset, error=KafkaError(KafkaError._PARTITION_EOF)
+    )
+
+
+class FakeClock:
+    """A monotonic clock that only moves when told to (the fake consumer's polls move it)."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class FakeConsumer:
+    """Consumer double: scripted `poll` results, canned metadata and watermarks.
+
+    `script` items are returned one per `poll`: a message (or error event), `None` for an idle
+    poll, or an exception instance, which is raised. An exhausted script keeps idling. Every poll
+    advances `clock` by `tick` (messages) or by the poll timeout (idle), like a real wait would.
+    """
+
+    def __init__(
+        self,
+        conf: dict[str, Any],
+        *,
+        clock: FakeClock,
+        topic: str = "orders",
+        marks: dict[int, tuple[int, int]] | None = None,
+        script: list[Any] | None = None,
+        times: dict[int, int] | None = None,
+        tick: float = 0.01,
+        topic_error=None,
+        watermark_error: Exception | None = None,
+        time_errors: dict[int, Any] | None = None,
+        call_cost: float = 0.0,
+    ):
+        self.conf = conf
+        self.clock = clock
+        self.topic = topic
+        self.marks = marks if marks is not None else {0: (0, 0)}
+        self.script = list(script or [])
+        self.times = times or {}
+        self.tick = tick
+        self.assigned: list[tuple[int, int]] | None = None
+        self.poll_timeouts: list[float] = []
+        self.metadata_timeouts: list[float | None] = []
+        self.watermark_timeouts: list[float | None] = []
+        self.closed = False
+        self.calls: list[str] = []
+        self.watermark_error = watermark_error
+        self.topic_error = topic_error
+        self.time_errors = time_errors or {}
+        self.call_cost = call_cost  # clock time each metadata/watermark/times call "takes"
+        self.times_timeouts: list[float | None] = []
+
+    def list_topics(self, topic: str | None = None, timeout: float | None = None):
+        from confluent_kafka.admin import ClusterMetadata
+
+        self.metadata_timeouts.append(timeout)
+        self.clock.now += self.call_cost
+        meta = ClusterMetadata()
+        if topic == self.topic:
+            parts = [partition(p, 1, [1], [1]) for p in sorted(self.marks)]
+            meta.topics = {topic: topic_meta(topic, parts, error=self.topic_error)}
+        else:
+            meta.topics = {}
+        return meta
+
+    def get_watermark_offsets(self, tp, timeout: float | None = None, cached: bool = False):
+        self.watermark_timeouts.append(timeout)
+        self.clock.now += self.call_cost
+        if self.watermark_error is not None:
+            raise self.watermark_error
+        return self.marks[tp.partition]
+
+    def offsets_for_times(self, tps, timeout: float | None = None):
+        from types import SimpleNamespace
+
+        self.times_timeouts.append(timeout)
+        self.clock.now += self.call_cost
+        return [
+            SimpleNamespace(
+                topic=tp.topic,
+                partition=tp.partition,
+                offset=self.times.get(tp.partition, -1),
+                error=self.time_errors.get(tp.partition),
+            )
+            for tp in tps
+        ]
+
+    def assign(self, tps) -> None:
+        self.calls.append("assign")
+        self.assigned = [(tp.partition, tp.offset) for tp in tps]
+
+    def poll(self, timeout: float | None = None):
+        self.calls.append("poll")
+        assert timeout is not None
+        self.poll_timeouts.append(timeout)
+        item = self.script.pop(0) if self.script else None
+        if isinstance(item, BaseException):
+            raise item
+        self.clock.now += timeout if item is None else self.tick
+        return item
+
+    def subscribe(self, *args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a browsing consumer must never subscribe")
+
+    def commit(self, *args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a browsing consumer must never commit")
+
+    def close(self) -> None:
+        self.calls.append("close")
+        self.closed = True

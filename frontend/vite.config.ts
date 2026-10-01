@@ -11,5 +11,11 @@ export default defineConfig({
     port: 5173,
     proxy: { '/api': { target: 'http://127.0.0.1:8000', ws: true } },
   },
-  test: { environment: 'jsdom', setupFiles: 'src/test/setup.ts' },
+  test: {
+    environment: 'jsdom',
+    setupFiles: 'src/test/setup.ts',
+    // Tests that convert local date-times pin the zone: UTC+5:30 with no DST, so a conversion
+    // bug cannot hide behind a host that happens to run in UTC.
+    env: { TZ: 'Asia/Kolkata' },
+  },
 })

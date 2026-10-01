@@ -58,6 +58,13 @@ describe('TopicDetail', () => {
     expect(await screen.findByText(/0 partitions/)).toBeInTheDocument()
   })
 
+  it('shows the snapshot form on the Messages tab', () => {
+    setup('/c/dev/topics/t')
+
+    expect(screen.getByRole('button', { name: 'Fetch' })).toBeInTheDocument()
+    expect(screen.queryByText('Coming soon')).not.toBeInTheDocument()
+  })
+
   it('falls back to the first tab for an unknown ?tab=', () => {
     setup('/c/dev/topics/t?tab=bogus')
 
