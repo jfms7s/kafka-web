@@ -210,6 +210,23 @@ def test_failed_check_reports_the_cause_from_error_callbacks(
     assert "SASL authentication error" in info.value.message
 
 
+def test_cause_survives_a_flood_of_repeated_error_events(
+    store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes
+):
+    store.create(plaintext())
+
+    def tls_failure_then_retries(admin):
+        admin.conf["error_cb"](KafkaError(KafkaError._SSL, "SSL handshake failed"))
+        for _ in range(200):  # librdkafka keeps retrying until list_topics times out
+            admin.conf["error_cb"](KafkaError(KafkaError._ALL_BROKERS_DOWN, "1/1 brokers are down"))
+        raise KafkaException(KafkaError(KafkaError._TRANSPORT, "Failed to get metadata"))
+
+    fakes.on_list_topics = tls_failure_then_retries
+    with pytest.raises(BrokerError) as info:
+        registry.get("dev")
+    assert info.value.code == "tls_error"
+
+
 def test_client_constructor_failure_is_mapped(store: ClusterStore, fakes: Fakes):
     store.create(plaintext())
 

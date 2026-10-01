@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -50,19 +49,24 @@ class ClusterConnection:
 
 class _ReportedErrors:
     """`error_cb` sink. librdkafka reports *why* a broker connection failed (bad SASL password,
-    untrusted certificate, refused connection) only as error events, served by `poll()`."""
+    untrusted certificate, refused connection) only as error events, served by `poll()`.
+
+    Keeps the latest event per error code: retries repeat `_ALL_BROKERS_DOWN` many times, and a
+    plain ring buffer would evict the one event that names the cause.
+    """
 
     def __init__(self) -> None:
-        self._errors: deque[KafkaError] = deque(maxlen=32)
+        self._latest: dict[int, KafkaError] = {}
         self._lock = threading.Lock()
 
     def __call__(self, err: KafkaError) -> None:
         with self._lock:
-            self._errors.append(err)
+            self._latest.pop(err.code(), None)  # re-insert: dict order = order of last report
+            self._latest[err.code()] = err
 
     def snapshot(self) -> list[KafkaError]:
         with self._lock:
-            return list(self._errors)
+            return list(self._latest.values())
 
 
 def _write_temp_pem(pem: str) -> Path:
