@@ -159,7 +159,8 @@ describe('MessagesTab form', () => {
 
     const { searchParams } = messageRequests()[0]
     expect(searchParams.get('start')).toBe('timestamp')
-    expect(searchParams.get('timestamp')).toBe(String(new Date('2024-05-01T10:30').getTime()))
+    // TZ is pinned to Asia/Kolkata (UTC+5:30, no DST) in vite.config.ts: 10:30 local is 05:00Z.
+    expect(searchParams.get('timestamp')).toBe('1714539600000')
     expect(searchParams.has('offset')).toBe(false)
   })
 
