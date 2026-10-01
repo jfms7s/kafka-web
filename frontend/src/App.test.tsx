@@ -12,6 +12,7 @@ function renderAt(path: string) {
       const path = new URL(request.url).pathname
       if (path === '/api/status') return Response.json({ connections: [] })
       if (path.endsWith('/topics')) return Response.json({ topics: [] })
+      if (path.endsWith('/groups')) return Response.json({ groups: [] })
       return Response.json([])
     }),
   )
@@ -51,9 +52,15 @@ describe('App routes', () => {
     expect(screen.getByRole('tab', { name: 'Config' })).toBeInTheDocument()
   })
 
-  it('/c/:cluster/groups shows the placeholder', async () => {
+  it('/c/:cluster/groups shows the consumer groups', async () => {
     renderAt('/c/dev/groups')
-    expect(await screen.findByText('Consumer Groups — coming in a later task')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Consumer Groups' })).toBeInTheDocument()
+    expect(await screen.findByText('0 groups')).toBeInTheDocument()
+  })
+
+  it('/c/:cluster/groups/:group shows the group detail', async () => {
+    renderAt('/c/dev/groups/billing')
+    expect(await screen.findByRole('heading', { name: 'billing' })).toBeInTheDocument()
   })
 
   it('an unknown route says not found', async () => {

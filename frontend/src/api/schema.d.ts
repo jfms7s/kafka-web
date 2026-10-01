@@ -146,6 +146,59 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/clusters/{name}/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Groups */
+        get: operations["list_groups_api_clusters__name__groups_get"];
+        put?: never;
+        /** Create Group */
+        post: operations["create_group_api_clusters__name__groups_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/clusters/{name}/groups/{group}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Describe Group */
+        get: operations["describe_group_api_clusters__name__groups__group__get"];
+        put?: never;
+        post?: never;
+        /** Delete Group */
+        delete: operations["delete_group_api_clusters__name__groups__group__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/clusters/{name}/groups/{group}/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reset Offsets */
+        post: operations["reset_offsets_api_clusters__name__groups__group__reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/clusters/{name}/topics/{topic}/messages": {
         parameters: {
             query?: never;
@@ -185,6 +238,13 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AssignmentItem */
+        AssignmentItem: {
+            /** Topic */
+            topic: string;
+            /** Partition */
+            partition: number;
+        };
         /** BatchResultView */
         BatchResultView: {
             /** Succeeded */
@@ -319,6 +379,23 @@ export interface components {
             /** Active Streams */
             active_streams: number;
         };
+        /** CreateGroupRequest */
+        CreateGroupRequest: {
+            /** Group Id */
+            group_id: string;
+            /** Topic */
+            topic: string;
+            /**
+             * Start
+             * @enum {string}
+             */
+            start: "earliest" | "latest";
+        };
+        /** CreatedGroupView */
+        CreatedGroupView: {
+            /** Group Id */
+            group_id: string;
+        };
         /** Decoded */
         Decoded: {
             /**
@@ -333,6 +410,35 @@ export interface components {
             /** Json Value */
             json_value?: unknown;
         };
+        /** GroupDetailView */
+        GroupDetailView: {
+            /** Group Id */
+            group_id: string;
+            /** State */
+            state: string;
+            /** Type */
+            type: string;
+            /** Members */
+            members: components["schemas"]["MemberItem"][];
+            /** Offsets */
+            offsets: components["schemas"]["OffsetItem"][];
+        };
+        /** GroupListView */
+        GroupListView: {
+            /** Groups */
+            groups: components["schemas"]["GroupSummaryView"][];
+        };
+        /** GroupSummaryView */
+        GroupSummaryView: {
+            /** Group Id */
+            group_id: string;
+            /** State */
+            state: string;
+            /** Type */
+            type: string;
+            /** Is Simple */
+            is_simple: boolean;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -343,6 +449,17 @@ export interface components {
             /** Key */
             key: string;
             value: components["schemas"]["Decoded"];
+        };
+        /** MemberItem */
+        MemberItem: {
+            /** Member Id */
+            member_id: string;
+            /** Client Id */
+            client_id: string;
+            /** Host */
+            host: string;
+            /** Assignments */
+            assignments: components["schemas"]["AssignmentItem"][];
         };
         /** MessageListView */
         MessageListView: {
@@ -366,6 +483,24 @@ export interface components {
             value: components["schemas"]["Decoded"];
             /** Headers */
             headers: components["schemas"]["HeaderView"][];
+        };
+        /** OffsetItem */
+        OffsetItem: {
+            /** Topic */
+            topic: string;
+            /** Partition */
+            partition: number;
+            /** Committed */
+            committed: number | null;
+            /** End */
+            end: number | null;
+            /** Lag */
+            lag: number | null;
+        };
+        /** OffsetListView */
+        OffsetListView: {
+            /** Offsets */
+            offsets: components["schemas"]["OffsetItem"][];
         };
         /** PartitionView */
         PartitionView: {
@@ -400,6 +535,26 @@ export interface components {
             partition: number;
             /** Offset */
             offset: number;
+        };
+        /** ResetRequest */
+        ResetRequest: {
+            /** Topic */
+            topic: string;
+            /**
+             * Strategy
+             * @enum {string}
+             */
+            strategy: "earliest" | "latest" | "timestamp";
+            /**
+             * Timestamp
+             * @description Epoch milliseconds
+             */
+            timestamp?: number | null;
+            /**
+             * Confirm
+             * @description Must equal the group id
+             */
+            confirm?: string | null;
         };
         /** RowResultView */
         RowResultView: {
@@ -781,6 +936,174 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TopicConfigView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_groups_api_clusters__name__groups_get: {
+        parameters: {
+            query?: {
+                filter?: string | null;
+            };
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupListView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_group_api_clusters__name__groups_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedGroupView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    describe_group_api_clusters__name__groups__group__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+                group: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GroupDetailView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_group_api_clusters__name__groups__group__delete: {
+        parameters: {
+            query?: {
+                confirm?: string | null;
+            };
+            header?: never;
+            path: {
+                name: string;
+                group: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reset_offsets_api_clusters__name__groups__group__reset_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+                group: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OffsetListView"];
                 };
             };
             /** @description Validation Error */

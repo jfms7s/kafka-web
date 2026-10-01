@@ -6,11 +6,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
-from kafka_web.api.deps import RegistryDep, require_confirm, writable_cluster
+from kafka_web.api.deps import RegistryDep, open_connection, require_confirm, writable_cluster
 from kafka_web.api.uploads import read_upload
 from kafka_web.config.models import ClusterConfig
-from kafka_web.errors import Conflict, ValidationFailed
-from kafka_web.kafka.registry import ClusterConnection, ConnectionRegistry
+from kafka_web.errors import ValidationFailed
+from kafka_web.kafka.registry import ConnectionRegistry
 from kafka_web.services import publish as publishing
 from kafka_web.services.consume import SnapshotParams, consume_snapshot
 from kafka_web.services.decode import MessageView
@@ -68,19 +68,6 @@ class BatchResultView(BaseModel):
     results: list[RowResultView]
 
 
-def _open_connection(registry: ConnectionRegistry, name: str) -> ClusterConnection:
-    """The cluster's connection for a write. One that was closed by a concurrent edit, delete or
-    disconnect after we got it is fetched again (reconnecting); closed again → 409."""
-    connection = registry.get(name)
-    if connection.closed:
-        connection = registry.get(name)
-        if connection.closed:
-            raise Conflict(
-                f"Cluster {name!r} was changed while publishing; try again", code="cluster_changed"
-            )
-    return connection
-
-
 @router.post("/clusters/{name}/topics/{topic}/messages")
 def publish_message(
     name: str,
@@ -90,7 +77,7 @@ def publish_message(
     _cluster: WritableCluster,
 ) -> PublishedView:
     headers = publishing.parse_headers(body.headers)  # before connecting: cheap 422s first
-    connection = _open_connection(registry, name)
+    connection = open_connection(registry, name)
     partitions = publishing.require_topic(connection.admin, topic)
     if body.partition is not None and body.partition >= partitions:
         raise ValidationFailed(
@@ -141,7 +128,7 @@ def _publish_bulk(
     value_column: str | None,
 ) -> BatchResultView:
     items = publishing.parse_bulk(content, key_column, value_column)
-    connection = _open_connection(registry, name)
+    connection = open_connection(registry, name)
     publishing.require_topic(connection.admin, topic)
     result = publishing.publish(connection.producer, topic, items, FLUSH_TIMEOUT_S)
     return BatchResultView.model_validate(result, from_attributes=True)

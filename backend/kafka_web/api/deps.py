@@ -6,8 +6,8 @@ from fastapi import Depends, Request
 
 from kafka_web.config.models import ClusterConfig
 from kafka_web.config.store import ClusterStore
-from kafka_web.errors import Forbidden, ValidationFailed
-from kafka_web.kafka.registry import ConnectionRegistry
+from kafka_web.errors import Conflict, Forbidden, ValidationFailed
+from kafka_web.kafka.registry import ClusterConnection, ConnectionRegistry
 
 
 def get_store(request: Request) -> ClusterStore:
@@ -38,3 +38,17 @@ def require_confirm(expected: str, given: str | None) -> None:
             code="confirmation_mismatch",
             field="confirm",
         )
+
+
+def open_connection(registry: ConnectionRegistry, name: str) -> ClusterConnection:
+    """The cluster's connection for a request. One that was closed by a concurrent edit, delete or
+    disconnect after we got it is fetched again (reconnecting); closed again → 409."""
+    connection = registry.get(name)
+    if connection.closed:
+        connection = registry.get(name)
+        if connection.closed:
+            raise Conflict(
+                f"Cluster {name!r} was changed during the request; try again",
+                code="cluster_changed",
+            )
+    return connection
