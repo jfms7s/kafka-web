@@ -328,3 +328,70 @@ def test_snapshot_params_defaults_and_bounds() -> None:
     for bad in ({"count": 0}, {"count": 10_001}, {"timeout": 0.5}, {"timeout": 61}):
         with pytest.raises(ValueError):
             SnapshotParams(**bad)
+
+
+def test_negative_timestamps_are_rejected_as_listoffsets_sentinels() -> None:
+    for sentinel in (-1, -2, -3):
+        with pytest.raises(ValueError):
+            SnapshotParams(start="timestamp", timestamp=sentinel)
+    assert SnapshotParams(start="timestamp", timestamp=0).timestamp == 0
+
+
+def test_a_failed_partition_in_offsets_for_times_fails_the_request() -> None:
+    err = KafkaError(KafkaError._TIMED_OUT, "no answer")
+    h = Harness(marks={0: (0, 5), 1: (0, 5)}, times={0: 2, 1: -1}, time_errors={1: err})
+
+    with pytest.raises(KafkaTimeout):
+        h.run(start="timestamp", timestamp=1234)
+
+    assert h.consumer.assigned is None  # not a silently partial result
+    assert h.consumer.closed
+
+
+def test_offsets_for_times_error_for_an_unknown_partition_is_mapped() -> None:
+    err = KafkaError(KafkaError.UNKNOWN_TOPIC_OR_PART)
+    h = Harness(marks={0: (0, 5)}, time_errors={0: err})
+
+    with pytest.raises(NotFound):
+        h.run(start="timestamp", timestamp=1234)
+
+
+def test_setup_calls_share_the_request_budget() -> None:
+    h = Harness(marks={0: (0, 5), 1: (0, 5)}, call_cost=0.6, times={0: 1, 1: 1})
+
+    h.run(start="timestamp", timestamp=1234, timeout=2)
+
+    c = h.consumer
+    # Each call is capped by what is left of the 2 s budget (and by its own 10 s cap).
+    assert c.metadata_timeouts == [pytest.approx(2.0)]
+    assert c.watermark_timeouts == [pytest.approx(1.4), pytest.approx(0.8)]
+    assert c.times_timeouts == [pytest.approx(0.2)]
+
+
+def test_budget_spent_during_setup_is_a_504_not_an_unbounded_wait() -> None:
+    h = Harness(marks={0: (0, 5), 1: (0, 5)}, call_cost=3.0)
+
+    with pytest.raises(KafkaTimeout):
+        h.run(start="earliest", timeout=2)
+
+    assert len(h.consumer.watermark_timeouts) == 0  # no further call once the budget is gone
+    assert h.consumer.closed
+
+
+def test_polling_gets_only_what_setup_left_over() -> None:
+    h = Harness(marks={0: (0, 5)}, call_cost=0.5)
+
+    h.run(start="earliest", timeout=2)
+
+    # metadata 0.5 + watermark 0.5 -> 1 s left for polling
+    assert sum(h.consumer.poll_timeouts) == pytest.approx(1.0)
+    assert h.clock.now == pytest.approx(1002.0)  # the whole request took exactly `timeout`
+
+
+def test_a_call_never_waits_longer_than_its_own_cap_even_with_a_big_budget() -> None:
+    h = Harness(marks={0: (0, 1)}, script=msgs(0, 0, 1))
+
+    h.run(start="earliest", timeout=60)
+
+    assert h.consumer.metadata_timeouts == [10]
+    assert h.consumer.watermark_timeouts == [10]

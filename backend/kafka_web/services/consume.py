@@ -14,7 +14,7 @@ from typing import Any
 from confluent_kafka import Consumer, KafkaError, TopicPartition
 from pydantic import BaseModel, Field
 
-from kafka_web.errors import NotFound, ValidationFailed
+from kafka_web.errors import KafkaTimeout, NotFound, ValidationFailed
 from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception
 from kafka_web.services.decode import MessageView, to_message_view
 from kafka_web.services.offsets import StartMode, end_offsets, is_done, plan_start_offsets
@@ -30,7 +30,9 @@ class SnapshotParams(BaseModel):
     timeout: float = Field(10, ge=1, le=60)
     start: StartMode = "latest"
     offset: int | None = None  # start == "offset": required, and so is `partition`
-    timestamp: int | None = None  # start == "timestamp": required (epoch ms)
+    # start == "timestamp": required (epoch ms). Negative values are ListOffsets sentinels
+    # (-1 latest, -2 earliest, -3 max timestamp), not times.
+    timestamp: int | None = Field(None, ge=0)
     partition: int | None = None
 
 
@@ -44,6 +46,24 @@ def _validate(params: SnapshotParams) -> None:
         raise ValidationFailed("start=timestamp requires a timestamp", field="timestamp")
 
 
+class _Budget:
+    """One deadline for the whole request: setup calls and polling draw from the same `timeout`."""
+
+    def __init__(self, timeout: float, clock: Callable[[], float]):
+        self._clock = clock
+        self.deadline = clock() + timeout
+
+    def remaining(self) -> float:
+        return self.deadline - self._clock()
+
+    def call_timeout(self) -> float:
+        """Timeout for one blocking call: its own cap, or what is left if that is less."""
+        remaining = self.remaining()
+        if remaining <= 0:
+            raise KafkaTimeout("The snapshot ran out of time before it could start reading")
+        return min(CALL_TIMEOUT_S, remaining)
+
+
 def _consumer_config(client_config: dict[str, str]) -> dict[str, Any]:
     return {
         **client_config,
@@ -55,8 +75,11 @@ def _consumer_config(client_config: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def _partition_ids(consumer: Consumer, topic: str, wanted: int | None) -> list[int]:
-    metadata = call_with_timeout(lambda: consumer.list_topics(topic, timeout=CALL_TIMEOUT_S))
+def _partition_ids(
+    consumer: Consumer, topic: str, wanted: int | None, budget: _Budget
+) -> list[int]:
+    wait = budget.call_timeout()
+    metadata = call_with_timeout(lambda: consumer.list_topics(topic, timeout=wait))
     found = metadata.topics.get(topic)
     if found is not None and found.error is not None:
         raise map_kafka_exception(found.error)
@@ -70,24 +93,33 @@ def _partition_ids(consumer: Consumer, topic: str, wanted: int | None) -> list[i
 
 
 def _watermarks(
-    consumer: Consumer, topic: str, partitions: list[int]
+    consumer: Consumer, topic: str, partitions: list[int], budget: _Budget
 ) -> dict[int, tuple[int, int]]:
-    return {
-        p: call_with_timeout(
-            lambda p=p: consumer.get_watermark_offsets(
-                TopicPartition(topic, p), timeout=CALL_TIMEOUT_S
+    marks = {}
+    for p in partitions:
+        wait = budget.call_timeout()
+        marks[p] = call_with_timeout(
+            lambda p=p, wait=wait: consumer.get_watermark_offsets(
+                TopicPartition(topic, p), timeout=wait
             )
         )
-        for p in partitions
-    }
+    return marks
 
 
 def _timestamp_offsets(
-    consumer: Consumer, topic: str, partitions: list[int], timestamp: int
+    consumer: Consumer, topic: str, partitions: list[int], timestamp: int, budget: _Budget
 ) -> dict[int, int]:
-    """Earliest offset at/after `timestamp` per partition (-1: none)."""
+    """Earliest offset at/after `timestamp` per partition (-1: none).
+
+    A partition the broker could not answer for fails the request: skipping it would silently
+    return partial results.
+    """
     asked = [TopicPartition(topic, p, timestamp) for p in partitions]
-    answered = call_with_timeout(lambda: consumer.offsets_for_times(asked, timeout=CALL_TIMEOUT_S))
+    wait = budget.call_timeout()
+    answered = call_with_timeout(lambda: consumer.offsets_for_times(asked, timeout=wait))
+    for tp in answered:
+        if tp.error is not None:
+            raise map_kafka_exception(tp.error)
     return {tp.partition: tp.offset for tp in answered}
 
 
@@ -97,15 +129,13 @@ def _poll_until_done(
     ends: dict[int, int],
     *,
     limit: int | None,
-    timeout: float,
-    clock: Callable[[], float],
+    budget: _Budget,
 ) -> list[MessageView]:
     """Poll until `limit` messages, the deadline, or every planned partition reached its end."""
     positions = dict(start_offsets)  # partition -> next offset to be read
     collected: list[MessageView] = []
-    deadline = clock() + timeout
     while (limit is None or len(collected) < limit) and not is_done(positions, ends):
-        remaining = deadline - clock()
+        remaining = budget.remaining()
         if remaining <= 0:
             break
         wait = min(POLL_SLICE_S, remaining)
@@ -139,23 +169,24 @@ def consume_snapshot(
     clock: Callable[[], float] = time.monotonic,
 ) -> list[MessageView]:
     _validate(params)
+    budget = _Budget(params.timeout, clock)
     consumer = call_with_timeout(lambda: consumer_factory(_consumer_config(client_config)))
     try:
-        return _snapshot(consumer, topic, params, clock)
+        return _snapshot(consumer, topic, params, budget)
     finally:
         with contextlib.suppress(Exception):  # a failing close must not mask the real outcome
             consumer.close()
 
 
 def _snapshot(
-    consumer: Consumer, topic: str, params: SnapshotParams, clock: Callable[[], float]
+    consumer: Consumer, topic: str, params: SnapshotParams, budget: _Budget
 ) -> list[MessageView]:
-    partitions = _partition_ids(consumer, topic, params.partition)
-    watermarks = _watermarks(consumer, topic, partitions)
+    partitions = _partition_ids(consumer, topic, params.partition, budget)
+    watermarks = _watermarks(consumer, topic, partitions, budget)
     lookup = None
     if params.start == "timestamp":
         assert params.timestamp is not None  # _validate
-        lookup = _timestamp_offsets(consumer, topic, partitions, params.timestamp)
+        lookup = _timestamp_offsets(consumer, topic, partitions, params.timestamp, budget)
     plan = plan_start_offsets(
         params.start,
         watermarks,
@@ -173,8 +204,6 @@ def _snapshot(
     # `latest` reads every planned range completely (about `count` messages in all) and trims
     # afterwards: stopping at the first `count` arrivals could drop the newest of another partition.
     limit = None if params.start == "latest" else params.count
-    messages = _poll_until_done(
-        consumer, plan, ends, limit=limit, timeout=params.timeout, clock=clock
-    )
+    messages = _poll_until_done(consumer, plan, ends, limit=limit, budget=budget)
     messages.sort(key=lambda m: (m.timestamp or 0, m.partition, m.offset))
     return messages[-params.count :] if params.start == "latest" else messages

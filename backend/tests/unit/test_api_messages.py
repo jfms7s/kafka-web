@@ -94,6 +94,7 @@ def test_unknown_cluster_is_404(client: TestClient, calls: list) -> None:
         ("timeout=0", "timeout"),
         ("timeout=61", "timeout"),
         ("start=middle", "start"),
+        ("start=timestamp&timestamp=-1", "timestamp"),
         ("count=abc", "count"),
     ],
 )

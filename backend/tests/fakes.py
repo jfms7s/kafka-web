@@ -190,6 +190,8 @@ class FakeConsumer:
         tick: float = 0.01,
         topic_error=None,
         watermark_error: Exception | None = None,
+        time_errors: dict[int, Any] | None = None,
+        call_cost: float = 0.0,
     ):
         self.conf = conf
         self.clock = clock
@@ -206,11 +208,15 @@ class FakeConsumer:
         self.calls: list[str] = []
         self.watermark_error = watermark_error
         self.topic_error = topic_error
+        self.time_errors = time_errors or {}
+        self.call_cost = call_cost  # clock time each metadata/watermark/times call "takes"
+        self.times_timeouts: list[float | None] = []
 
     def list_topics(self, topic: str | None = None, timeout: float | None = None):
         from confluent_kafka.admin import ClusterMetadata
 
         self.metadata_timeouts.append(timeout)
+        self.clock.now += self.call_cost
         meta = ClusterMetadata()
         if topic == self.topic:
             parts = [partition(p, 1, [1], [1]) for p in sorted(self.marks)]
@@ -221,15 +227,24 @@ class FakeConsumer:
 
     def get_watermark_offsets(self, tp, timeout: float | None = None, cached: bool = False):
         self.watermark_timeouts.append(timeout)
+        self.clock.now += self.call_cost
         if self.watermark_error is not None:
             raise self.watermark_error
         return self.marks[tp.partition]
 
     def offsets_for_times(self, tps, timeout: float | None = None):
-        from confluent_kafka import TopicPartition
+        from types import SimpleNamespace
 
+        self.times_timeouts.append(timeout)
+        self.clock.now += self.call_cost
         return [
-            TopicPartition(tp.topic, tp.partition, self.times.get(tp.partition, -1)) for tp in tps
+            SimpleNamespace(
+                topic=tp.topic,
+                partition=tp.partition,
+                offset=self.times.get(tp.partition, -1),
+                error=self.time_errors.get(tp.partition),
+            )
+            for tp in tps
         ]
 
     def assign(self, tps) -> None:
