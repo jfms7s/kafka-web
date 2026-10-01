@@ -77,7 +77,7 @@ const cases = [
 ] as const
 
 describe('cluster mutations', () => {
-  it.each(cases)('%s calls its endpoint and invalidates clusters and status', async (_name, useTrigger, method, path, respond) => {
+  it.each(cases.filter(([name]) => name !== 'test'))('%s calls its endpoint and invalidates clusters and status', async (_name, useTrigger, method, path, respond) => {
     const { wrapper, invalidatedKeys, lastRequest } = setup(respond)
     const { result } = renderHook(() => useTrigger(), { wrapper })
     await act(async () => {
@@ -88,6 +88,15 @@ describe('cluster mutations', () => {
     const keys = invalidatedKeys()
     expect(keys).toContainEqual(['clusters'])
     expect(keys).toContainEqual(['status'])
+  })
+
+  it('test changes no server state, so it invalidates nothing', async () => {
+    const { wrapper, invalidatedKeys } = setup(() => Response.json({ ok: true }))
+    const { result } = renderHook(() => useTestCluster(), { wrapper })
+    await act(async () => {
+      await result.current.mutateAsync({ input: BODY })
+    })
+    expect(invalidatedKeys()).toEqual([])
   })
 
   it.each([

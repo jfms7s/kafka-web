@@ -77,9 +77,18 @@ export function ClusterForm() {
 }
 
 function EditLoader({ name }: { name: string }) {
-  const { data, error, isPending } = useCluster(name)
-  if (isPending) return <p className="text-slate-500">Loading cluster…</p>
-  if (error) {
+  // A cached copy may be stale, and a full PUT from a stale form would silently revert changes
+  // (e.g. read-only), so the form is only seeded once a fetch made after mounting has landed.
+  const { data, isError, error, isFetchedAfterMount } = useCluster(name, true, {
+    refetchOnMount: 'always',
+  })
+  // Once seeded, later background refetches must neither unmount the form nor reset what the
+  // user has typed (`FormBody` reads `saved` only for its initial state).
+  const [seeded, setSeeded] = useState(false)
+  if (!seeded && isFetchedAfterMount && !isError && data) setSeeded(true)
+
+  if (seeded && data) return <FormBody key={name} saved={data} />
+  if (isError) {
     return (
       <p className="text-red-700">
         Could not load cluster “{name}”: {error.message}.{' '}
@@ -89,7 +98,7 @@ function EditLoader({ name }: { name: string }) {
       </p>
     )
   }
-  return <FormBody key={name} saved={data} />
+  return <p className="text-slate-500">Loading cluster…</p>
 }
 
 function initialState(saved?: ClusterView): FormState {

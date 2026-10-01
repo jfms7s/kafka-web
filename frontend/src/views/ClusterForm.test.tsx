@@ -20,8 +20,9 @@ const callsTo = (method: string, pathname: string) =>
     .filter((r) => r.method === method && new URL(r.url).pathname === pathname)
 const bodyOf = (request: Request) => request.clone().json() as Promise<Record<string, unknown>>
 
-function renderForm(path = '/clusters/new') {
+function renderForm(path = '/clusters/new', prime?: (client: QueryClient) => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  prime?.(client)
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
@@ -267,6 +268,50 @@ describe('ClusterForm edit', () => {
     const env = await screen.findByLabelText('Environment')
     await user.clear(env)
     await user.type(env, 'prd')
+    expect(screen.getByLabelText('Read-only')).not.toBeChecked()
+  })
+})
+
+describe('ClusterForm edit with a stale cache', () => {
+  it('seeds the form from a fresh fetch, not from the cached cluster', async () => {
+    // The cache still says read_only: false; the server (e.g. after another tab) says true.
+    mockFetch(() => Response.json({ ...SAVED, read_only: true }))
+    const user = renderForm('/clusters/stg-eu/edit', (client) =>
+      client.setQueryData(['clusters', 'stg-eu'], { ...SAVED, read_only: false }),
+    )
+    expect(screen.queryByLabelText('Read-only')).not.toBeInTheDocument()
+    expect(screen.getByText(/loading/i)).toBeInTheDocument()
+
+    expect(await screen.findByLabelText('Read-only')).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(1))
+    expect(await bodyOf(callsTo('PUT', '/api/clusters/stg-eu')[0])).toMatchObject({
+      read_only: true,
+    })
+  })
+
+  it('shows the error when the refetch fails instead of the stale cached values', async () => {
+    mockFetch(() => Response.json({ code: 'boom', message: 'Server exploded' }, { status: 500 }))
+    renderForm('/clusters/stg-eu/edit', (client) =>
+      client.setQueryData(['clusters', 'stg-eu'], { ...SAVED, read_only: false }),
+    )
+    expect(await screen.findByText(/Server exploded/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Read-only')).not.toBeInTheDocument()
+  })
+
+  it('keeps the form and what was typed when a later background refetch changes the data', async () => {
+    mockFetch(editHandler)
+    const clientRef: { current?: QueryClient } = {}
+    const user = renderForm('/clusters/stg-eu/edit', (client) => (clientRef.current = client))
+    const env = await screen.findByLabelText('Environment')
+    await user.clear(env)
+    await user.type(env, 'qa')
+
+    mockFetch(() => Response.json({ ...SAVED, env: 'other', read_only: true }))
+    await clientRef.current!.invalidateQueries({ queryKey: ['clusters', 'stg-eu'] })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(screen.getByLabelText('Environment')).toHaveValue('qa')
     expect(screen.getByLabelText('Read-only')).not.toBeChecked()
   })
 })
