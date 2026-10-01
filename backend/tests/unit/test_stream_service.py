@@ -521,3 +521,19 @@ def test_setup_errors_that_retrying_cannot_fix_are_not_retried() -> None:
     assert worker.error is not None
     assert worker.error.code == "topic_not_found"
     assert len(consumers.created[0].metadata_call_times) == 1
+
+
+def test_stream_consumer_never_auto_creates_topics_whatever_the_client_config() -> None:
+    consumers = LiveConsumers()
+    stop = threading.Event()
+    stop.set()
+    conf = {**CONF, "allow.auto.create.topics": "true"}
+    worker = StreamWorker(
+        conf, "orders", StreamParams(), BoundedDropQueue(), stop, consumer_factory=consumers
+    )
+
+    worker.start()
+    worker.join(timeout=2)
+
+    [consumer] = consumers.created
+    assert consumer.conf["allow.auto.create.topics"] == "false"

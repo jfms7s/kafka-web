@@ -17,6 +17,7 @@ type Mechanism = ClusterInput['sasl_mechanism'] & string
 const PROTOCOLS: Protocol[] = ['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL']
 const MECHANISMS: Mechanism[] = ['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512']
 const TRUSTSTORE_REQUIRED = 'Truststore is required for TLS'
+const NO_PASSWORD = 'Password is required (none is saved)'
 const KEEP_HINT = 'Leave blank to keep the saved value'
 
 const usesTls = (p: Protocol) => p === 'SSL' || p === 'SASL_SSL'
@@ -77,9 +78,18 @@ export function ClusterForm() {
 }
 
 function EditLoader({ name }: { name: string }) {
-  const { data, error, isPending } = useCluster(name)
-  if (isPending) return <p className="text-slate-500">Loading cluster…</p>
-  if (error) {
+  // A cached copy may be stale, and a full PUT from a stale form would silently revert changes
+  // (e.g. read-only), so the form is only seeded once a fetch made after mounting has landed.
+  const { data, isError, error, isFetchedAfterMount } = useCluster(name, true, {
+    refetchOnMount: 'always',
+  })
+  // Once seeded, later background refetches must neither unmount the form nor reset what the
+  // user has typed (`FormBody` reads `saved` only for its initial state).
+  const [seeded, setSeeded] = useState(false)
+  if (!seeded && isFetchedAfterMount && !isError && data) setSeeded(true)
+
+  if (seeded && data) return <FormBody key={name} saved={data} />
+  if (isError) {
     return (
       <p className="text-red-700">
         Could not load cluster “{name}”: {error.message}.{' '}
@@ -89,7 +99,7 @@ function EditLoader({ name }: { name: string }) {
       </p>
     )
   }
-  return <FormBody key={name} saved={data} />
+  return <p className="text-slate-500">Loading cluster…</p>
 }
 
 function initialState(saved?: ClusterView): FormState {
@@ -124,14 +134,19 @@ function FormBody({ saved }: { saved?: ClusterView }) {
   const [errors, setErrors] = useState<FieldErrors>({})
   const [testResult, setTestResult] = useState<TestResult | null>(null)
 
-  const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
+  // Any edit invalidates a previous test: its verdict was about the values as they were then.
+  const set = <K extends keyof FormState>(key: K, value: FormState[K]) => {
+    setTestResult(null)
     setForm((current) => ({ ...current, [key]: value }))
+  }
 
   const tls = usesTls(form.protocol)
   const sasl = usesSasl(form.protocol)
+  const hasSavedPassword = saved?.has_sasl_password === true
   const hasSavedTruststore = editing && (saved.truststore?.length ?? 0) > 0
 
   function changeEnv(env: string) {
+    setTestResult(null)
     setForm((current) => ({
       ...current,
       env,
@@ -140,6 +155,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
   }
 
   async function chooseFile(chosen: File | undefined) {
+    setTestResult(null)
     if (!chosen) {
       setFile(null)
       return
@@ -159,6 +175,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
     const problems: FieldErrors = {}
     const truststore = file?.base64 ?? form.pastedTruststore.trim()
     if (tls && !truststore && !hasSavedTruststore) problems.truststore = TRUSTSTORE_REQUIRED
+    if (sasl && !form.password && !hasSavedPassword) problems.sasl_password = NO_PASSWORD
     const extra = parseExtra(form.extra)
     if ('badLine' in extra) problems.extra = `Line ${extra.badLine} must look like key=value`
     setErrors(problems)
@@ -321,9 +338,9 @@ function FormBody({ saved }: { saved?: ClusterView }) {
             <input
               {...fieldProps('sasl_password')}
               type="password"
-              required={!editing}
+              required={!hasSavedPassword}
               autoComplete="new-password"
-              placeholder={editing ? KEEP_HINT : ''}
+              placeholder={hasSavedPassword ? KEEP_HINT : ''}
               value={form.password}
               onChange={(e) => set('password', e.target.value)}
               className={INPUT}
@@ -399,7 +416,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
           checked={form.readOnly}
           onChange={(e) => {
             setReadOnlyTouched(true)
-            set('readOnly', e.target.checked)
+            set('readOnly', e.target.checked) // also clears a stale test result
           }}
         />
         Read-only

@@ -1,17 +1,14 @@
 """Publishing against a real broker; what was published is read back with the snapshot endpoint."""
 
-import contextlib
 import json
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient
 from fastapi.testclient import TestClient
-
-from tests.integration.conftest import _free_ports, _plaintext_env, _start, _wait_ready
 
 pytestmark = pytest.mark.integration
 
@@ -82,21 +79,6 @@ def test_single_publish_with_json_headers_and_no_key(
     assert message["key"]["data"] is None
     assert message["value"]["data"] == "plain text"
     assert {h["key"]: h["value"]["data"] for h in message["headers"]} == {"n": "3", "who": "me"}
-
-
-@pytest.fixture
-def auto_create_kafka() -> Iterator[str]:
-    """Bootstrap of a broker of its own that *would* create a topic on first use."""
-    [port] = _free_ports(1)
-    env = {**_plaintext_env(port), "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "true"}
-    container = _start(env, [port], {})
-    try:
-        bootstrap = f"localhost:{port}"
-        _wait_ready(container, {"bootstrap.servers": bootstrap})
-        yield bootstrap
-    finally:
-        with contextlib.suppress(Exception):
-            container.stop()
 
 
 def _topic_names(bootstrap: str) -> set[str]:

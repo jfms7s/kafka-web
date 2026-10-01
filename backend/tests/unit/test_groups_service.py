@@ -236,6 +236,17 @@ def test_resolve_targets_unknown_topic_is_not_found() -> None:
     assert caught.value.code == "topic_not_found"
 
 
+def test_resolve_targets_never_asks_the_brokers_about_a_topic_by_name() -> None:
+    # A by-name metadata request can auto-create the topic on a broker that allows it.
+    admin = FakeGroupAdmin(topics={"orders": 2})
+
+    with pytest.raises(NotFound):
+        resolve_targets(admin, "ghost", "latest", None)
+
+    assert admin.list_topics_calls
+    assert all(call["topic"] is None for call in admin.list_topics_calls)
+
+
 def test_resolve_targets_unresolvable_offset_is_an_error_not_a_bogus_reset() -> None:
     admin = FakeGroupAdmin(topics={"orders": 1})  # no latest known → broker answers -1
 

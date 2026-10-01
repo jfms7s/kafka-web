@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +7,7 @@ import { ToastProvider } from '../components/Toasts'
 import { ClusterForm } from './ClusterForm'
 
 type Handler = (request: Request) => Response | Promise<Response>
+type User = ReturnType<typeof userEvent.setup>
 let fetchMock: ReturnType<typeof vi.fn<(request: Request) => Promise<Response>>>
 
 function mockFetch(handler: Handler = () => Response.json({})) {
@@ -20,8 +21,9 @@ const callsTo = (method: string, pathname: string) =>
     .filter((r) => r.method === method && new URL(r.url).pathname === pathname)
 const bodyOf = (request: Request) => request.clone().json() as Promise<Record<string, unknown>>
 
-function renderForm(path = '/clusters/new') {
+function renderForm(path = '/clusters/new', prime?: (client: QueryClient) => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  prime?.(client)
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
@@ -271,6 +273,109 @@ describe('ClusterForm edit', () => {
   })
 })
 
+describe('ClusterForm saved SASL password', () => {
+  it('refuses to save a SASL cluster that has no saved password and none typed', async () => {
+    mockFetch(() => Response.json({ ...SAVED, has_sasl_password: false }))
+    const user = renderForm('/clusters/stg-eu/edit')
+    const password = await screen.findByLabelText('SASL password')
+    expect(password).not.toHaveAttribute('placeholder', expect.stringMatching(/leave blank/i))
+    expect(password).toBeRequired()
+
+    // The browser's own `required` check stops a click on Save; submit directly to reach ours.
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(0)
+    fireEvent.submit(password.closest('form')!)
+
+    expect(await screen.findByText('Password is required (none is saved)')).toBeInTheDocument()
+    expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(0)
+  })
+
+  it('accepts a typed password when none is saved', async () => {
+    mockFetch(() => Response.json({ ...SAVED, has_sasl_password: false }))
+    const user = renderForm('/clusters/stg-eu/edit')
+    await user.type(await screen.findByLabelText('SASL password'), 'new-secret')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(1))
+    expect(await bodyOf(callsTo('PUT', '/api/clusters/stg-eu')[0])).toMatchObject({
+      sasl_password: 'new-secret',
+    })
+  })
+
+  it('requires a password when an existing non-SASL cluster is switched to SASL', async () => {
+    mockFetch(() =>
+      Response.json({
+        ...SAVED,
+        security_protocol: 'PLAINTEXT',
+        sasl_mechanism: null,
+        sasl_username: null,
+        has_sasl_password: false,
+        truststore: null,
+      }),
+    )
+    const user = renderForm('/clusters/stg-eu/edit')
+    await user.selectOptions(await screen.findByLabelText('Security protocol'), 'SASL_PLAINTEXT')
+    await user.type(screen.getByLabelText('SASL username'), 'svc')
+    expect(screen.getByLabelText('SASL password')).toBeRequired()
+    fireEvent.submit(screen.getByLabelText('SASL password').closest('form')!)
+    expect(await screen.findByText('Password is required (none is saved)')).toBeInTheDocument()
+    expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(0)
+  })
+
+  it('keeps the keep-blank hint when a password is saved', async () => {
+    mockFetch(editHandler)
+    renderForm('/clusters/stg-eu/edit')
+    expect(await screen.findByLabelText('SASL password')).toHaveAttribute(
+      'placeholder',
+      expect.stringMatching(/leave blank to keep/i),
+    )
+    expect(screen.getByLabelText('SASL password')).not.toBeRequired()
+  })
+})
+
+describe('ClusterForm edit with a stale cache', () => {
+  it('seeds the form from a fresh fetch, not from the cached cluster', async () => {
+    // The cache still says read_only: false; the server (e.g. after another tab) says true.
+    mockFetch(() => Response.json({ ...SAVED, read_only: true }))
+    const user = renderForm('/clusters/stg-eu/edit', (client) =>
+      client.setQueryData(['clusters', 'stg-eu'], { ...SAVED, read_only: false }),
+    )
+    expect(screen.queryByLabelText('Read-only')).not.toBeInTheDocument()
+    expect(screen.getByText(/loading/i)).toBeInTheDocument()
+
+    expect(await screen.findByLabelText('Read-only')).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(1))
+    expect(await bodyOf(callsTo('PUT', '/api/clusters/stg-eu')[0])).toMatchObject({
+      read_only: true,
+    })
+  })
+
+  it('shows the error when the refetch fails instead of the stale cached values', async () => {
+    mockFetch(() => Response.json({ code: 'boom', message: 'Server exploded' }, { status: 500 }))
+    renderForm('/clusters/stg-eu/edit', (client) =>
+      client.setQueryData(['clusters', 'stg-eu'], { ...SAVED, read_only: false }),
+    )
+    expect(await screen.findByText(/Server exploded/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Read-only')).not.toBeInTheDocument()
+  })
+
+  it('keeps the form and what was typed when a later background refetch changes the data', async () => {
+    mockFetch(editHandler)
+    const clientRef: { current?: QueryClient } = {}
+    const user = renderForm('/clusters/stg-eu/edit', (client) => (clientRef.current = client))
+    const env = await screen.findByLabelText('Environment')
+    await user.clear(env)
+    await user.type(env, 'qa')
+
+    mockFetch(() => Response.json({ ...SAVED, env: 'other', read_only: true }))
+    await clientRef.current!.invalidateQueries({ queryKey: ['clusters', 'stg-eu'] })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(screen.getByLabelText('Environment')).toHaveValue('qa')
+    expect(screen.getByLabelText('Read-only')).not.toBeChecked()
+  })
+})
+
 describe('ClusterForm test connection', () => {
   it('posts the form values to /api/clusters/test and shows success', async () => {
     mockFetch(() => Response.json({ ok: true }))
@@ -283,6 +388,43 @@ describe('ClusterForm test connection', () => {
     expect(new URL(calls[0].url).search).toBe('')
     expect(await bodyOf(calls[0])).toMatchObject({ name: 'dev', bootstrap_servers: 'localhost:9092' })
     expect(callsTo('POST', '/api/clusters')).toHaveLength(0)
+  })
+
+  it.each([
+    ['bootstrap servers', (user: User) => user.type(screen.getByLabelText('Bootstrap servers'), '2')],
+    ['environment', (user: User) => user.type(screen.getByLabelText('Environment'), 'x')],
+    ['read-only', (user: User) => user.click(screen.getByLabelText('Read-only'))],
+    [
+      'security protocol',
+      (user: User) => user.selectOptions(screen.getByLabelText('Security protocol'), 'SSL'),
+    ],
+  ])('clears a stale "Connection OK" once the %s is changed', async (_field, change) => {
+    mockFetch(() => Response.json({ ok: true }))
+    const user = renderForm()
+    await fillBasics(user)
+    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    expect(await screen.findByText('Connection OK')).toBeInTheDocument()
+
+    await change(user)
+
+    expect(screen.queryByText('Connection OK')).not.toBeInTheDocument()
+  })
+
+  it('clears a stale "Connection OK" once a truststore file is chosen', async () => {
+    mockFetch(() => Response.json({ ok: true }))
+    const user = renderForm()
+    await fillBasics(user)
+    await user.selectOptions(screen.getByLabelText('Security protocol'), 'SSL')
+    await user.type(screen.getByLabelText('Truststore (base64)'), 'cGVt')
+    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    expect(await screen.findByText('Connection OK')).toBeInTheDocument()
+
+    await user.upload(
+      screen.getByLabelText('Truststore file'),
+      new File(['x'], 'ca.pem', { type: 'text/plain' }),
+    )
+
+    expect(screen.queryByText('Connection OK')).not.toBeInTheDocument()
   })
 
   it('shows the failure message inline', async () => {

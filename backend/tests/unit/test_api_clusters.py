@@ -123,6 +123,16 @@ def test_create_plaintext(client: TestClient):
     }
 
 
+def test_create_with_a_secret_in_extra_is_422_on_extra(client: TestClient):
+    body = plaintext_body(extra={"ssl.key.password": "hunter2-value"})
+
+    response = client.post("/api/clusters", json=body)
+
+    assert response.status_code == 422
+    assert response.json()["field"] == "extra"
+    assert "hunter2-value" not in response.text
+
+
 def test_create_sasl_ssl_view_has_no_secrets(client: TestClient, jks_b64: str, certs):
     response = client.post("/api/clusters", json=sasl_ssl_body(jks_b64))
     assert response.status_code == 201

@@ -27,9 +27,12 @@ ADMIN_TIMEOUT_S = 10.0
 PRODUCER_FLUSH_TIMEOUT_S = 5
 # Defaults under the user's `extra`: a TCP/TLS connect never waits longer than the admin calls.
 _CLIENT_DEFAULTS = {"socket.connection.setup.timeout.ms": "10000"}
-# `allow.auto.create.topics=false`: publishing checks that the topic exists first; this keeps a
-# topic deleted between that check and produce() from being silently re-created.
-_PRODUCER_DEFAULTS = {"message.timeout.ms": "30000", "allow.auto.create.topics": "false"}
+_PRODUCER_DEFAULTS = {"message.timeout.ms": "30000"}
+# Forced over the user's `extra`: no client of ours may ever create a topic. A metadata request
+# for a missing topic would otherwise create it on a broker that allows auto-creation (read-only
+# clusters included), and a topic deleted between publish's existence check and produce() would
+# be silently re-created.
+_FORCED = {"allow.auto.create.topics": "false"}
 
 
 def check_connectivity(admin: AdminClient, timeout: float = ADMIN_TIMEOUT_S) -> None:
@@ -293,7 +296,9 @@ class ConnectionRegistry:
     def _open(self, name: str) -> ClusterConnection:
         conf = self.client_config(name)
         admin = self._connected_admin(conf)
-        producer = call_with_timeout(lambda: self._producer_factory({**_PRODUCER_DEFAULTS, **conf}))
+        producer = call_with_timeout(
+            lambda: self._producer_factory({**_PRODUCER_DEFAULTS, **conf, **_FORCED})
+        )
         return ClusterConnection(
             name=name,
             client_config=conf,
@@ -305,7 +310,9 @@ class ConnectionRegistry:
     def _connected_admin(self, conf: dict[str, str]) -> AdminClient:
         """Create an admin client and run the connectivity check; nothing is kept on failure."""
         reported = _ReportedErrors()
-        admin = call_with_timeout(lambda: self._admin_factory({**conf, "error_cb": reported}))
+        admin = call_with_timeout(
+            lambda: self._admin_factory({**conf, **_FORCED, "error_cb": reported})
+        )
         try:
             call_with_timeout(lambda: self._check(admin))
         except AppError as exc:

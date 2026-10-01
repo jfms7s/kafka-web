@@ -413,3 +413,15 @@ def test_a_call_never_waits_longer_than_its_own_cap_even_with_a_big_budget() -> 
 
     assert h.consumer.metadata_timeouts == [10]
     assert h.consumer.watermark_timeouts == [10]
+
+
+def test_snapshot_consumer_never_auto_creates_topics_whatever_the_client_config() -> None:
+    h = Harness(marks={0: (0, 0)})
+    consume_snapshot(
+        {**CONF, "allow.auto.create.topics": "true"},
+        "orders",
+        SnapshotParams(start="earliest"),
+        consumer_factory=h.factory,
+        clock=h.clock,
+    )
+    assert h.consumer.conf["allow.auto.create.topics"] == "false"

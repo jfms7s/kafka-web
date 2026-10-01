@@ -11,8 +11,9 @@ from typing import Any, Literal
 
 from confluent_kafka import KafkaError, KafkaException, Message, Producer
 
-from kafka_web.errors import AppError, BrokerError, KafkaTimeout, NotFound, ValidationFailed
-from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception, redact
+from kafka_web.errors import AppError, BrokerError, KafkaTimeout, ValidationFailed
+from kafka_web.kafka.errors import map_kafka_exception, redact
+from kafka_web.kafka.topic_lookup import find_topic
 
 DEFAULT_FLUSH_TIMEOUT_S = 30.0
 # A bulk file may hold at most this many data rows: each row costs memory (parsed message, result,
@@ -447,16 +448,5 @@ def publish_one(
 
 
 def require_topic(admin: Any, topic: str, timeout: float = _METADATA_TIMEOUT_S) -> int:
-    """The partition count of `topic`; 404 `topic_not_found` if the cluster has no such topic.
-
-    Looks the topic up in the full listing, never by asking the brokers about that one name: a
-    broker with `auto.create.topics.enable` may create a topic that is merely asked about, and
-    publishing must never create one.
-    """
-    metadata = call_with_timeout(lambda: admin.list_topics(timeout=timeout))
-    found = metadata.topics.get(topic)
-    if found is None:
-        raise NotFound(f"Topic {topic!r} does not exist", code="topic_not_found")
-    if found.error is not None:
-        raise map_kafka_exception(found.error)
-    return len(found.partitions)
+    """The partition count of `topic`; 404 `topic_not_found` if the cluster has no such topic."""
+    return len(find_topic(admin, topic, timeout).partitions)
