@@ -178,3 +178,14 @@ def test_describe_configs_future_is_resolved_with_the_timeout() -> None:
 
     with pytest.raises(KafkaTimeout):
         describe_topic(admin, "orders", timeout=0.01)
+
+
+def test_source_given_as_a_raw_int_is_named() -> None:
+    """The real client reports `ConfigEntry.source` as a plain int."""
+    entry = config_entry("retention.ms", "1")
+    entry.source = 1  # DYNAMIC_TOPIC_CONFIG
+    admin = FakeTopicAdmin({"orders": orders_meta()}, {"orders": {"retention.ms": entry}})
+
+    [view] = describe_topic(admin, "orders").entries
+
+    assert view.source == "DYNAMIC_TOPIC_CONFIG"

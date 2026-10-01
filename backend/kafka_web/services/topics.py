@@ -3,7 +3,13 @@
 from dataclasses import dataclass
 from typing import Any
 
-from confluent_kafka.admin import AdminClient, ConfigEntry, ConfigResource, ResourceType
+from confluent_kafka.admin import (
+    AdminClient,
+    ConfigEntry,
+    ConfigResource,
+    ConfigSource,
+    ResourceType,
+)
 
 from kafka_web.errors import NotFound
 from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception
@@ -86,7 +92,7 @@ def _entry_view(entry: ConfigEntry) -> ConfigEntryView:
         value=value,
         display_value=humanize_config_value(entry.name, value),
         is_default=bool(entry.is_default),
-        source=entry.source.name,
+        source=ConfigSource(entry.source).name,
         sensitive=bool(entry.is_sensitive),
     )
 

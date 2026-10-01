@@ -190,13 +190,13 @@ def kafka_sasl_ssl(
 
 @pytest.fixture
 def topic_factory(kafka_plaintext: str) -> Iterator[Callable[..., str]]:
-    """`create(partitions=3) -> name`: uniquely named topics, deleted after the test."""
+    """`create(partitions=3, config=None) -> name`: unique topics, deleted after the test."""
     admin = AdminClient({"bootstrap.servers": kafka_plaintext})
     created: list[str] = []
 
-    def create(partitions: int = 3) -> str:
+    def create(partitions: int = 3, config: dict[str, str] | None = None) -> str:
         name = f"it-{uuid.uuid4().hex[:12]}"
-        future = admin.create_topics([NewTopic(name, partitions, 1)])[name]
+        future = admin.create_topics([NewTopic(name, partitions, 1, config=config or {})])[name]
         future.result(timeout=10)
         created.append(name)
         return name
