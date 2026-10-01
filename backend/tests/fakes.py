@@ -3,6 +3,7 @@
 import queue
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -451,3 +452,202 @@ class DeliveringProducer:
         if self.deliver_on_flush:
             self._deliver(include_late=False)
         return len([1 for index, _ in self._queue if index not in self.late])
+
+
+def _done(result: Any = None, error: BaseException | None = None):
+    from concurrent.futures import Future
+
+    future: Future = Future()
+    if error is not None:
+        future.set_exception(error)
+    else:
+        future.set_result(result)
+    return future
+
+
+def kafka_exc(code: int, text: str = "broker said no"):
+    from confluent_kafka import KafkaError, KafkaException
+
+    return KafkaException(KafkaError(code, text))
+
+
+def member(member_id: str, client_id: str, host: str, assigned: list[tuple[str, int]] | None):
+    from confluent_kafka import TopicPartition
+    from confluent_kafka.admin import MemberAssignment, MemberDescription
+
+    tps = None if assigned is None else [TopicPartition(t, p) for t, p in assigned]
+    return MemberDescription(member_id, client_id, host, MemberAssignment(tps))
+
+
+def group_description(
+    group_id: str,
+    state: str = "EMPTY",
+    *,
+    members: list | None = None,
+    type: str = "CLASSIC",
+):
+    from confluent_kafka import ConsumerGroupState, ConsumerGroupType
+    from confluent_kafka.admin import ConsumerGroupDescription
+
+    return ConsumerGroupDescription(
+        group_id,
+        False,
+        members or [],
+        "range",
+        ConsumerGroupState[state],
+        None,  # type: ignore[arg-type]
+        type=ConsumerGroupType[type],
+    )
+
+
+def group_listing(group_id: str, state: str | None = "EMPTY", type: str | None = "CLASSIC"):
+    from confluent_kafka import ConsumerGroupState, ConsumerGroupType
+    from confluent_kafka.admin import ConsumerGroupListing
+
+    return ConsumerGroupListing(
+        group_id,
+        False,
+        None if state is None else ConsumerGroupState[state],
+        None if type is None else ConsumerGroupType[type],
+    )
+
+
+class FakeGroupAdmin:
+    """Admin double for the group service: canned groups, offsets and metadata; records writes.
+
+    `descriptions` maps group → ConsumerGroupDescription (or an exception to fail with);
+    `committed` maps group → {(topic, partition): offset}; `latest` / `earliest` / `by_time` map
+    (topic, partition) → offset (`by_time` also takes a `{partition: offset}` per timestamp).
+    A group missing from `descriptions` describes as DEAD, like a classic broker answers.
+    """
+
+    def __init__(
+        self,
+        *,
+        listings: list | None = None,
+        list_errors: list | None = None,
+        descriptions: dict | None = None,
+        committed: dict | None = None,
+        topics: dict[str, int] | None = None,
+        latest: dict[tuple[str, int], int] | None = None,
+        earliest: dict[tuple[str, int], int] | None = None,
+        by_time: dict[tuple[str, int], int] | None = None,
+    ):
+        self.listings = listings or []
+        self.list_errors = list_errors or []
+        self.descriptions = descriptions or {}
+        self.committed = committed or {}
+        self.topics = topics or {}
+        self.latest = latest or {}
+        self.earliest = earliest or {}
+        self.by_time = by_time or {}
+        self.alter_error: BaseException | None = None  # whole-call failure
+        self.alter_partition_error: Any = None  # a KafkaError set on every altered partition
+        self.delete_error: BaseException | None = None
+        self.list_offsets_errors: dict[tuple[str, int], BaseException] = {}
+        self.alter_calls: list[tuple[str, list[tuple[str, int, int]]]] = []
+        self.delete_calls: list[list[str]] = []
+        self.spec_calls: list[tuple[str, int, str]] = []
+        self.kwargs_seen: list[dict[str, Any]] = []
+
+    def poll(self, timeout: float | None = None) -> int:
+        return 0
+
+    def list_topics(self, topic: str | None = None, timeout: float | None = None):
+        from confluent_kafka.admin import ClusterMetadata
+
+        meta = ClusterMetadata()
+        meta.topics = {
+            name: topic_meta(name, [partition(i, 1, [1], [1]) for i in range(count)])
+            for name, count in self.topics.items()
+            if topic is None or name == topic
+        }
+        return meta
+
+    def list_consumer_groups(self, **kwargs: Any):
+        from confluent_kafka.admin import ListConsumerGroupsResult
+
+        self.kwargs_seen.append(kwargs)
+        return _done(ListConsumerGroupsResult(self.listings, self.list_errors))
+
+    def describe_consumer_groups(self, group_ids: list[str], **kwargs: Any):
+        self.kwargs_seen.append(kwargs)
+        out = {}
+        for group in group_ids:
+            found = self.descriptions.get(group)
+            if isinstance(found, BaseException):
+                out[group] = _done(error=found)
+            else:
+                out[group] = _done(found or group_description(group, "DEAD"))
+        return out
+
+    def list_consumer_group_offsets(self, requests: list, **kwargs: Any):
+        from confluent_kafka import ConsumerGroupTopicPartitions, TopicPartition
+
+        self.kwargs_seen.append(kwargs)
+        out = {}
+        for request in requests:
+            committed = self.committed.get(request.group_id, {})
+            tps = [TopicPartition(t, p, o) for (t, p), o in sorted(committed.items())]
+            out[request.group_id] = _done(ConsumerGroupTopicPartitions(request.group_id, tps))
+        return out
+
+    def alter_consumer_group_offsets(self, requests: list, **kwargs: Any):
+        self.kwargs_seen.append(kwargs)
+        out = {}
+        for request in requests:
+            self.alter_calls.append(
+                (
+                    request.group_id,
+                    [(tp.topic, tp.partition, tp.offset) for tp in request.topic_partitions],
+                )
+            )
+            if self.alter_error is not None:
+                out[request.group_id] = _done(error=self.alter_error)
+                continue
+            tps = [
+                SimpleNamespace(
+                    topic=tp.topic,
+                    partition=tp.partition,
+                    offset=tp.offset,
+                    error=self.alter_partition_error,
+                )
+                for tp in request.topic_partitions
+            ]
+            if self.alter_partition_error is None:
+                for tp in tps:
+                    self.committed.setdefault(request.group_id, {})[(tp.topic, tp.partition)] = (
+                        tp.offset
+                    )
+                self.descriptions.setdefault(request.group_id, group_description(request.group_id))
+            out[request.group_id] = _done(
+                SimpleNamespace(group_id=request.group_id, topic_partitions=tps)
+            )
+        return out
+
+    def delete_consumer_groups(self, group_ids: list[str], **kwargs: Any):
+        self.kwargs_seen.append(kwargs)
+        self.delete_calls.append(list(group_ids))
+        if self.delete_error is not None:
+            return {g: _done(error=self.delete_error) for g in group_ids}
+        return {g: _done(None) for g in group_ids}
+
+    def list_offsets(self, specs: dict, **kwargs: Any):
+        from confluent_kafka.admin import ListOffsetsResultInfo
+
+        self.kwargs_seen.append(kwargs)
+        out = {}
+        for tp, spec in specs.items():
+            key = (tp.topic, tp.partition)
+            kind = type(spec).__name__
+            self.spec_calls.append((tp.topic, tp.partition, kind))
+            if key in self.list_offsets_errors:
+                out[tp] = _done(error=self.list_offsets_errors[key])
+                continue
+            table = {
+                "LatestSpec": self.latest,
+                "EarliestSpec": self.earliest,
+                "TimestampSpec": self.by_time,
+            }[kind]
+            out[tp] = _done(ListOffsetsResultInfo(table.get(key, -1), -1, -1))
+        return out
