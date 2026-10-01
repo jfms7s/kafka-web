@@ -169,3 +169,17 @@ def test_cluster_input_carries_write_only_fields():
     assert isinstance(inp.sasl_password, SecretStr)
     assert "pw" not in repr(inp)
     assert "tp" not in repr(inp)
+
+
+def test_metadata_broker_list_alias_is_forbidden_in_extra():
+    with pytest.raises(ValidationFailed) as exc:
+        make(extra={"metadata.broker.list": "evil:9092"})
+    assert exc.value.field == "extra"
+
+
+@pytest.mark.parametrize("model", [ClusterBase, ClusterConfig, ClusterInput])
+def test_unknown_keys_are_rejected_naming_the_key(model):
+    with pytest.raises(ValidationFailed) as exc:
+        model(name="a", env="e", bootstrap_servers="b:1", **{"read-only": True})
+    assert exc.value.field == "read-only"
+    assert "read-only" in exc.value.message

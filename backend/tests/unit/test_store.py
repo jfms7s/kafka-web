@@ -552,3 +552,68 @@ def test_invalid_input_that_bypasses_validation_still_surfaces_as_validation_fai
     with pytest.raises(ValidationFailed) as exc:
         store.materialize(bad, existing=None)
     assert exc.value.field == "name"
+
+
+# --- review fixes -----------------------------------------------------------------------------
+
+
+def test_list_unparseable_yaml_date_raises_config_file_invalid(store: ClusterStore, root: Path):
+    write_yaml(
+        root,
+        "clusters:\n  - {name: x, env: dev, bootstrap_servers: 'b:1', region: 2024-13-45}\n",
+    )
+    with pytest.raises(ConfigFileInvalid) as exc:
+        store.list()
+    assert "clusters.yaml" in exc.value.message
+    with pytest.raises(ConfigFileInvalid):
+        store.get("x")
+    with pytest.raises(ConfigFileInvalid):
+        store.create(plaintext("y"))
+
+
+def test_list_valid_yaml_date_in_string_field_names_the_field(store: ClusterStore, root: Path):
+    write_yaml(
+        root,
+        "clusters:\n  - {name: x, env: dev, bootstrap_servers: 'b:1', region: 2024-01-05}\n",
+    )
+    with pytest.raises(ConfigFileInvalid) as exc:
+        store.list()
+    assert "region" in exc.value.message
+
+
+def test_list_unknown_key_raises_config_file_invalid_naming_the_key(
+    store: ClusterStore, root: Path
+):
+    write_yaml(
+        root,
+        "clusters:\n  - {name: prd, env: prd, bootstrap_servers: 'b:1', read-only: true}\n",
+    )
+    with pytest.raises(ConfigFileInvalid) as exc:
+        store.list()
+    assert "read-only" in exc.value.message
+    assert "'prd'" in exc.value.message
+
+
+def test_truststore_path_with_null_byte_is_unusable(store: ClusterStore, root: Path):
+    write_yaml(
+        root,
+        "clusters:\n  - {name: x, env: dev, bootstrap_servers: 'b:1', security_protocol: SSL, "
+        'truststore: "a\\0b"}\n',
+    )
+    [cfg] = store.list()
+    assert store.truststore_summary(cfg) is None
+    result = store.usability(cfg)
+    assert result.usable is False
+    assert result.reason == "truststore file unreadable: a\0b"
+
+
+def test_existing_loose_dirs_are_tightened_to_0700(
+    store: ClusterStore, root: Path, certs: CertBundle
+):
+    root.mkdir(mode=0o755)
+    root.chmod(0o755)
+    (root / "truststores").mkdir(mode=0o755)
+    (root / "truststores").chmod(0o755)
+    store.create(sasl_ssl(certs))
+    assert mode(root) == 0o700
+    assert mode(root / "truststores") == 0o700

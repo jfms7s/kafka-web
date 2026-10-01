@@ -10,6 +10,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     SecretStr,
     StringConstraints,
@@ -27,7 +28,8 @@ SaslMechanism = Literal["PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"]
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 FORBIDDEN_EXTRA_PREFIXES = ("bootstrap.servers", "security.protocol", "sasl.", "ssl.ca.")
 
-_FORBIDDEN_EXTRA_EXACT = FORBIDDEN_EXTRA_PREFIXES[:2]
+# `metadata.broker.list` is librdkafka's alias of `bootstrap.servers`.
+_FORBIDDEN_EXTRA_EXACT = (*FORBIDDEN_EXTRA_PREFIXES[:2], "metadata.broker.list")
 _FORBIDDEN_EXTRA_STARTS = FORBIDDEN_EXTRA_PREFIXES[2:]
 
 _NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -47,6 +49,9 @@ def to_validation_failed(exc: ValidationError) -> ValidationFailed:
 
 class ClusterBase(BaseModel):
     """Fields shared by the stored config and the API input."""
+
+    # A typo such as `read-only` must fail loudly, not silently fall back to a default.
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=NAME_PATTERN)
     env: _NonBlank

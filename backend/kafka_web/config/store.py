@@ -61,9 +61,8 @@ def _write_atomic(path: Path, content: str) -> None:
 
 
 def _ensure_private_dir(path: Path) -> None:
-    if not path.exists():
-        path.mkdir(parents=True)
-        path.chmod(0o700)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)  # mkdir's mode is masked by umask and ignored for pre-existing dirs
 
 
 class ClusterStore:
@@ -241,7 +240,7 @@ class ClusterStore:
             pem = path.read_text(encoding="ascii")
         except FileNotFoundError:
             raise _TruststoreUnusable(f"truststore file missing: {cfg.truststore}") from None
-        except (OSError, UnicodeDecodeError):
+        except (OSError, ValueError):  # ValueError: bad encoding, embedded null byte
             raise _TruststoreUnusable(f"truststore file unreadable: {cfg.truststore}") from None
         try:
             certs = summarize_pem(pem)
@@ -260,7 +259,7 @@ class ClusterStore:
             raise ConfigFileInvalid(
                 f"{_YAML_NAME} is not valid YAML (line {line}): {exc.problem}"
             ) from None
-        except yaml.YAMLError:
+        except (yaml.YAMLError, ValueError):  # ValueError: e.g. an impossible date like 2024-13-45
             raise ConfigFileInvalid(f"{_YAML_NAME} is not valid YAML") from None
 
         if doc is None:
