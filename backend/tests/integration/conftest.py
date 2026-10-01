@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from confluent_kafka import KafkaException
+from confluent_kafka import Consumer, KafkaException, TopicPartition
 from confluent_kafka.admin import AdminClient, NewTopic
 from cryptography.hazmat.primitives import serialization
 from fastapi.testclient import TestClient
@@ -188,9 +188,33 @@ def kafka_sasl_ssl(
         container.stop()
 
 
+def _wait_partitions_serving(bootstrap: str, topic: str, partitions: int) -> None:
+    """Block until every partition answers a watermark query.
+
+    Right after `create_topics` resolves a leader may still answer NOT_LEADER_FOR_PARTITION.
+    """
+    consumer = Consumer({"bootstrap.servers": bootstrap, "group.id": f"it-wait-{uuid.uuid4()}"})
+    deadline = time.monotonic() + READY_TIMEOUT_S
+    try:
+        for partition in range(partitions):
+            while True:
+                try:
+                    consumer.get_watermark_offsets(TopicPartition(topic, partition), timeout=2)
+                    break
+                except KafkaException:
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.1)
+    finally:
+        consumer.close()
+
+
 @pytest.fixture
 def topic_factory(kafka_plaintext: str) -> Iterator[Callable[..., str]]:
-    """`create(partitions=3, config=None) -> name`: unique topics, deleted after the test."""
+    """`create(partitions=3, config=None) -> name`: unique topics, deleted after the test.
+
+    Returns once every partition is serving, so tests never race the leader election.
+    """
     admin = AdminClient({"bootstrap.servers": kafka_plaintext})
     created: list[str] = []
 
@@ -199,6 +223,7 @@ def topic_factory(kafka_plaintext: str) -> Iterator[Callable[..., str]]:
         future = admin.create_topics([NewTopic(name, partitions, 1, config=config or {})])[name]
         future.result(timeout=10)
         created.append(name)
+        _wait_partitions_serving(kafka_plaintext, name, partitions)
         return name
 
     yield create
