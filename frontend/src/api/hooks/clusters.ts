@@ -12,8 +12,9 @@ export const statusKey = ['status'] as const
 export const useClusters = () =>
   useQuery({ queryKey: clustersKey, queryFn: () => unwrap(api.GET('/api/clusters')) })
 
-export const useCluster = (name: string) =>
+export const useCluster = (name: string, enabled = true) =>
   useQuery({
+    enabled,
     queryKey: [...clustersKey, name],
     queryFn: () => unwrap(api.GET('/api/clusters/{name}', { params: { path: { name } } })),
   })

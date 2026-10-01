@@ -24,13 +24,18 @@ function setup(respond: (request: Request) => Response) {
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   )
   const lastRequest = () => fetchMock.mock.calls.at(-1)![0]
-  return { wrapper, invalidate, lastRequest }
+  const invalidatedKeys = () =>
+    invalidate.mock.calls.map(([filters]) => filters?.queryKey as unknown[])
+  return { wrapper, invalidatedKeys, lastRequest }
 }
 
-const BODY = { name: 'dev', env: 'dev', bootstrap_servers: 'b:9092' }
-
-const invalidatedKeys = (invalidate: ReturnType<typeof vi.spyOn>) =>
-  invalidate.mock.calls.map((call) => (call[0] as { queryKey: unknown[] }).queryKey)
+const BODY = {
+  name: 'dev',
+  env: 'dev',
+  bootstrap_servers: 'b:9092',
+  security_protocol: 'PLAINTEXT' as const,
+  read_only: false,
+}
 
 describe('cluster queries', () => {
   it('useClusters fetches GET /api/clusters', async () => {
@@ -63,14 +68,14 @@ const cases = [
 
 describe('cluster mutations', () => {
   it.each(cases)('%s calls its endpoint and invalidates clusters and status', async (_name, useTrigger, method, path, respond) => {
-    const { wrapper, invalidate, lastRequest } = setup(respond)
+    const { wrapper, invalidatedKeys, lastRequest } = setup(respond)
     const { result } = renderHook(() => useTrigger(), { wrapper })
     await act(async () => {
       await result.current()
     })
     expect(lastRequest().method).toBe(method)
     expect(new URL(lastRequest().url).pathname).toBe(path)
-    const keys = invalidatedKeys(invalidate)
+    const keys = invalidatedKeys()
     expect(keys).toContainEqual(['clusters'])
     expect(keys).toContainEqual(['status'])
   })
