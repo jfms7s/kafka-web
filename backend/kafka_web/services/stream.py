@@ -88,8 +88,8 @@ class StreamWorker(threading.Thread):
         self._client_config = client_config
         self._topic = topic
         self._params = params
-        self._queue = queue
-        self._stop_event = stop
+        self.queue = queue
+        self.stop_event = stop
         self._consumer_factory = consumer_factory
         self._poll_interval = poll_interval
         self.error: AppError | None = None
@@ -135,20 +135,20 @@ class StreamWorker(threading.Thread):
             # them, from the high watermark captured above (not OFFSET_END: that could skip
             # messages produced since).
             starts = {p: plan.get(p, high) for p, (_, high) in marks.items()}
-        if self._stop_event.is_set():
+        if self.stop_event.is_set():
             return False
         tps = [TopicPartition(self._topic, p, offset) for p, offset in starts.items()]
         call_with_timeout(lambda: consumer.assign(tps))
         return True
 
     def _poll(self, consumer: Consumer) -> None:
-        while not self._stop_event.is_set():
+        while not self.stop_event.is_set():
             msg = call_with_timeout(lambda: consumer.poll(self._poll_interval))
             if msg is None:
                 continue
             err = msg.error()
             if err is None:
-                self._queue.put(to_message_view(msg))
+                self.queue.put(to_message_view(msg))
             elif err.code() in _TRANSIENT_ERRORS:
                 logger.info("Live stream on %r: transient error %s", self._topic, err.name())
             elif err.code() != KafkaError._PARTITION_EOF:

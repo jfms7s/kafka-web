@@ -1,10 +1,12 @@
 """FastAPI application factory: wiring, error handlers and lifecycle."""
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
+from confluent_kafka import Consumer
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -15,7 +17,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import Scope
 
-from kafka_web.api import clusters, messages, topics
+from kafka_web.api import clusters, messages, stream, topics
 from kafka_web.api.security import LOCAL_HOSTS, LocalOriginMiddleware
 from kafka_web.config.paths import config_dir
 from kafka_web.config.secrets import SecretStore
@@ -94,7 +96,9 @@ def create_app(
     store: ClusterStore | None = None,
     registry: ConnectionRegistry | None = None,
     static_dir: Path | None = None,
+    consumer_factory: Callable[[dict[str, Any]], Consumer] = Consumer,
 ) -> FastAPI:
+    """`consumer_factory` builds the live-stream consumers (tests inject a fake)."""
     store = store if store is not None else ClusterStore(config_dir(), SecretStore())
     registry = registry if registry is not None else ConnectionRegistry(store)
 
@@ -106,6 +110,7 @@ def create_app(
     app = FastAPI(title="kafka-web", lifespan=lifespan)
     app.state.store = store
     app.state.registry = registry
+    app.state.consumer_factory = consumer_factory
 
     # Outermost first: a foreign Host is refused before the Origin check or any route runs.
     app.add_middleware(LocalOriginMiddleware)
@@ -119,6 +124,7 @@ def create_app(
     app.include_router(clusters.router, prefix="/api")
     app.include_router(topics.router, prefix="/api")
     app.include_router(messages.router, prefix="/api")
+    app.include_router(stream.router, prefix="/api")
     if static_dir is not None:
         app.mount("/", SpaStaticFiles(directory=static_dir, html=True), name="static")
     return app
