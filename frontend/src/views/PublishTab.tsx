@@ -153,7 +153,7 @@ function SinglePublish({ cluster, topic }: { cluster: string; topic: string }) {
             />
           )}
         </Field>
-        <Field label="Headers" hint="JSON object or key=value lines" error={errors.headers}>
+        <Field label="Headers" hint="JSON object or key=value lines; whitespace around = is ignored" error={errors.headers}>
           {(props) => (
             <textarea
               {...props}
@@ -252,7 +252,7 @@ function BulkUpload({ cluster, topic }: { cluster: string; topic: string }) {
       </h2>
       <p className="mt-1 text-sm text-slate-600">
         A CSV file (one message per row) or a JSON array of{' '}
-        <code className="font-mono">{'{key?, value, headers?}'}</code> objects, up to 10 MB.
+        <code className="font-mono">{'{key?, value, headers?}'}</code> objects, up to 10 MB and 100,000 rows.
       </p>
       <form
         onSubmit={(event) => {

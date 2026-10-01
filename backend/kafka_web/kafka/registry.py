@@ -27,7 +27,9 @@ ADMIN_TIMEOUT_S = 10.0
 PRODUCER_FLUSH_TIMEOUT_S = 5
 # Defaults under the user's `extra`: a TCP/TLS connect never waits longer than the admin calls.
 _CLIENT_DEFAULTS = {"socket.connection.setup.timeout.ms": "10000"}
-_PRODUCER_DEFAULTS = {"message.timeout.ms": "30000"}
+# `allow.auto.create.topics=false`: publishing checks that the topic exists first; this keeps a
+# topic deleted between that check and produce() from being silently re-created.
+_PRODUCER_DEFAULTS = {"message.timeout.ms": "30000", "allow.auto.create.topics": "false"}
 
 
 def check_connectivity(admin: AdminClient, timeout: float = ADMIN_TIMEOUT_S) -> None:

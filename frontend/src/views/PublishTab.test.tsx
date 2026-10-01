@@ -133,7 +133,7 @@ describe('single publish', () => {
     setup()
     await loaded()
 
-    expect(screen.getByText('JSON object or key=value lines')).toBeInTheDocument()
+    expect(screen.getByText('JSON object or key=value lines; whitespace around = is ignored')).toBeInTheDocument()
   })
 
   it('needs a value before it sends anything', async () => {

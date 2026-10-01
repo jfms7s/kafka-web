@@ -97,8 +97,8 @@ def publish_message(
             f"partition: topic {topic!r} has {partitions} partitions", field="partition"
         )
     message = publishing.OutMessage(
-        key=None if body.key is None else body.key.encode(),
-        value=body.value.encode(),
+        key=None if body.key is None else publishing.encode_text(body.key, "key"),
+        value=publishing.encode_text(body.value, "value"),
         headers=headers,
         partition=body.partition,
     )

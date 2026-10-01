@@ -1,9 +1,11 @@
+import csv
 import json
 
 import pytest
 
 from kafka_web.errors import ValidationFailed
 from kafka_web.services.publish import (
+    MAX_BULK_ROWS,
     OutMessage,
     RowError,
     detect_format,
@@ -40,7 +42,7 @@ def test_headers_key_value_lines() -> None:
 
     assert parse_headers(text) == [
         ("trace", b"abc"),
-        ("source", b" web "),
+        ("source", b"web"),
         ("expr", b"a=b"),
         ("empty", b""),
     ]
@@ -212,13 +214,79 @@ def test_csv_that_is_not_utf8_is_rejected() -> None:
     assert info.value.field == "file"
 
 
-def test_csv_with_an_oversized_field_is_rejected() -> None:
+def test_csv_cell_over_128_kb_is_accepted() -> None:
     content = b"id,body\n1," + b"x" * 200_000 + b"\n"
+
+    [message] = parse_csv(content, "id", "body")
+
+    assert isinstance(message, OutMessage)
+    assert len(message.value) == 200_000
+
+
+def test_csv_cell_over_the_upload_cap_is_still_rejected() -> None:
+    content = b"id,body\n1," + b"x" * (10 * 1024 * 1024 + 1) + b"\n"
 
     with pytest.raises(ValidationFailed) as info:
         parse_csv(content, "id", "body")
 
     assert info.value.field == "file"
+
+
+def test_csv_key_column_may_also_be_the_value_column() -> None:
+    [message] = parse_csv(b"id,body,t\n7,hello,x\n", "id", "id")
+
+    assert message == OutMessage(key=b"7", value=b"7", headers=[("body", b"hello"), ("t", b"x")])
+
+
+# --- row cap ---------------------------------------------------------------------------------
+
+
+def csv_rows(count: int) -> bytes:
+    return b"a\n" + b"1\n" * count
+
+
+def json_rows(count: int) -> bytes:
+    return b"[" + b",".join([b'{"value":"v"}'] * count) + b"]"
+
+
+def test_csv_with_exactly_the_maximum_rows_is_accepted() -> None:
+    assert len(parse_csv(csv_rows(MAX_BULK_ROWS), None, None)) == MAX_BULK_ROWS
+
+
+def test_csv_with_one_row_too_many_is_rejected() -> None:
+    with pytest.raises(ValidationFailed) as info:
+        parse_csv(csv_rows(MAX_BULK_ROWS + 1), None, None)
+
+    assert info.value.code == "too_many_rows"
+    assert info.value.field == "file"
+    assert "100,000" in info.value.message
+
+
+def test_csv_parsing_stops_at_the_first_row_over_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    pulled = 0
+    real_reader = csv.reader
+
+    def counting_reader(*args, **kwargs):
+        nonlocal pulled
+        for row in real_reader(*args, **kwargs):
+            pulled += 1
+            yield row
+
+    monkeypatch.setattr(csv, "reader", counting_reader)
+
+    with pytest.raises(ValidationFailed):
+        parse_csv(csv_rows(MAX_BULK_ROWS + 5_000), None, None)
+
+    assert pulled == 1 + MAX_BULK_ROWS + 1  # header, the allowed rows, and the one over
+
+
+def test_ragged_and_blank_rows_count_toward_the_cap() -> None:
+    content = b"a,b\n" + b"1\n" * (MAX_BULK_ROWS + 1)
+
+    with pytest.raises(ValidationFailed) as info:
+        parse_csv(content, None, None)
+
+    assert info.value.code == "too_many_rows"
 
 
 # --- parse_json ------------------------------------------------------------------------------
@@ -305,3 +373,75 @@ def test_json_bad_items_are_row_errors_and_do_not_stop_the_rest(item: str, fragm
     assert isinstance(error, RowError)
     assert error.row == 2
     assert fragment in error.error
+
+
+def test_json_with_exactly_the_maximum_rows_is_accepted() -> None:
+    assert len(parse_json(json_rows(MAX_BULK_ROWS))) == MAX_BULK_ROWS
+
+
+def test_json_with_one_item_too_many_is_rejected() -> None:
+    with pytest.raises(ValidationFailed) as info:
+        parse_json(json_rows(MAX_BULK_ROWS + 1))
+
+    assert info.value.code == "too_many_rows"
+    assert info.value.field == "file"
+
+
+def test_json_parsing_stops_before_decoding_the_item_over_the_cap() -> None:
+    # Everything after the allowed items is garbage: only a parser that has not read on can
+    # report the cap instead of a syntax error.
+    content = json_rows(MAX_BULK_ROWS)[:-1] + b",{{{{ not json at all"
+
+    with pytest.raises(ValidationFailed) as info:
+        parse_json(content)
+
+    assert info.value.code == "too_many_rows"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"[1 2]", b"[1,]", b"[,1]", b"[1", b"[]]", b"[] x", b"[", b'[{"value": 1}, ]'],
+    ids=[
+        "no_comma",
+        "trailing_comma",
+        "leading_comma",
+        "unterminated",
+        "extra_bracket",
+        "extra",
+        "open",
+        "trailing_comma_object",
+    ],
+)
+def test_json_syntax_errors_are_still_rejected_by_the_incremental_parser(content: bytes) -> None:
+    with pytest.raises(ValidationFailed) as info:
+        parse_json(content)
+
+    assert info.value.field == "file"
+
+
+def test_json_array_surrounded_by_whitespace_is_fine() -> None:
+    assert parse_json(b' \n[ {"value": "a"} ,\n {"value": "b"} ]\n ') == [
+        OutMessage(key=None, value=b"a", headers=[]),
+        OutMessage(key=None, value=b"b", headers=[]),
+    ]
+
+
+# --- lone surrogates -------------------------------------------------------------------------
+
+
+def test_json_row_with_a_lone_surrogate_in_a_header_is_a_row_error() -> None:
+    [first, second] = parse_json(
+        b'[{"value": "v", "headers": {"h": "\\ud800"}},'
+        b' {"value": "v", "headers": {"\\ud800": "x"}}]'
+    )
+
+    assert isinstance(first, RowError) and "UTF-8" in first.error
+    assert isinstance(second, RowError) and "UTF-8" in second.error
+
+
+@pytest.mark.parametrize("text", ["h=\ud800", '{"h": "\ud800"}', '{"\ud800": "x"}', "\ud800=x"])
+def test_headers_with_a_lone_surrogate_are_a_validation_error(text: str) -> None:
+    with pytest.raises(ValidationFailed) as info:
+        parse_headers(text)
+
+    assert info.value.field == "headers"

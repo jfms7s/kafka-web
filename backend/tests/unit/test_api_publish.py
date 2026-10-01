@@ -14,9 +14,11 @@ from kafka_web.config.models import ClusterInput
 from kafka_web.config.secrets import SecretStore
 from kafka_web.config.store import ClusterStore
 from kafka_web.kafka.registry import ConnectionRegistry
+from kafka_web.services.publish import MAX_BULK_ROWS
 from tests.conftest import MemoryKeyring
 from tests.fakes import DeliveringProducer, Fakes, partition, topic_meta
 
+JSON = {"content-type": "application/json"}
 LOCAL = "http://127.0.0.1:8000"
 SINGLE = "/api/clusters/dev/topics/orders/messages"
 BULK = "/api/clusters/dev/topics/orders/messages/bulk"
@@ -406,3 +408,72 @@ def test_bulk_header_only_csv_publishes_nothing(harness: Harness) -> None:
     response = harness.bulk(b"id,body\n")
 
     assert response.json() == {"succeeded": 0, "failed": 0, "results": []}
+
+
+# --- lone surrogates in the single-publish body ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ({"value": "x", "key": "\ud800"}, "key"),
+        ({"value": "\ud800"}, "value"),
+        ({"value": "x", "headers": "h=\ud800"}, "headers"),
+        ({"value": "x", "headers": '{"h": "\ud800"}'}, "headers"),
+    ],
+)
+def test_single_publish_lone_surrogate_is_422_on_that_field(
+    harness: Harness, body: dict[str, Any], field: str
+) -> None:
+    response = harness.client.post(SINGLE, content=json.dumps(body), headers=JSON)
+
+    assert response.status_code == 422
+    assert response.json()["field"] == field
+    assert harness.produced == []
+
+
+def test_bulk_json_row_with_a_lone_surrogate_fails_only_that_row(harness: Harness) -> None:
+    content = b'[{"value": "ok"}, {"value": "\\ud800"}, {"key": "\\ud800", "value": "v"}]'
+
+    body = harness.bulk(content).json()
+
+    assert [r["ok"] for r in body["results"]] == [True, False, False]
+    assert "UTF-8" in body["results"][1]["error"]
+
+
+# --- row cap ---------------------------------------------------------------------------------
+
+
+def test_bulk_over_the_row_cap_is_422_and_nothing_is_produced(harness: Harness) -> None:
+    response = harness.bulk(b"a\n" + b"1\n" * (MAX_BULK_ROWS + 1))
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "too_many_rows"
+    assert response.json()["field"] == "file"
+    assert harness.produced == []
+
+
+def test_bulk_json_over_the_row_cap_is_422(harness: Harness) -> None:
+    content = b"[" + b",".join([b"{}"] * (MAX_BULK_ROWS + 1)) + b"]"
+
+    response = harness.bulk(content)
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "too_many_rows"
+    assert harness.produced == []
+
+
+def test_bulk_at_the_row_cap_publishes_every_row(harness: Harness) -> None:
+    response = harness.bulk(b"a\n" + b"1\n" * MAX_BULK_ROWS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["succeeded"], body["failed"]) == (MAX_BULK_ROWS, 0)
+    assert len(body["results"]) == MAX_BULK_ROWS
+
+
+def test_bulk_key_column_may_be_the_value_column(harness: Harness) -> None:
+    response = harness.bulk(b"id,body\n7,x\n", key_column="id", value_column="id")
+
+    assert response.status_code == 200
+    assert (harness.produced[0]["key"], harness.produced[0]["value"]) == (b"7", b"7")

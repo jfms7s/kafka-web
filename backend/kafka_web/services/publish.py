@@ -15,6 +15,20 @@ from kafka_web.errors import AppError, BrokerError, KafkaTimeout, NotFound, Vali
 from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception, redact
 
 DEFAULT_FLUSH_TIMEOUT_S = 30.0
+# A bulk file may hold at most this many data rows: each row costs memory (parsed message, result,
+# JSON response) and, on a dead broker, up to a flush timeout per full producer queue.
+MAX_BULK_ROWS = 100_000
+# One CSV cell may be as large as the upload itself (csv's own default is 128 KB).
+_CSV_FIELD_LIMIT = 10 * 1024 * 1024
+_JSON_WHITESPACE = re.compile(r"[ \t\n\r]*")
+
+
+def _skip_whitespace(text: str, at: int) -> int:
+    match = _JSON_WHITESPACE.match(text, at)
+    assert match is not None  # the pattern can match the empty string
+    return match.end()
+
+
 _QUEUE_FULL_POLL_S = 0.5
 _REPORT_GRACE_S = 0.5  # how long to wait for delivery reports another thread is still serving
 _METADATA_TIMEOUT_S = 10.0
@@ -42,9 +56,24 @@ class RowError:
 Item = OutMessage | RowError
 
 
+def encode_text(text: str, field: str) -> bytes:
+    """`text` as UTF-8; a lone surrogate (valid in JSON input, not in UTF-8) is a 422 on `field`."""
+    try:
+        return text.encode()
+    except UnicodeEncodeError:
+        raise ValidationFailed(
+            f"{field}: contains text that cannot be encoded as UTF-8", field=field
+        ) from None
+
+
 def _header_value(value: Any) -> bytes:
     """A header value as sent: strings as-is, anything else as its JSON text."""
     return (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)).encode()
+
+
+def _header(name: str, value: Any) -> tuple[str, bytes]:
+    name.encode()  # the client encodes names itself; fail here, where the error can be reported
+    return name, _header_value(value)
 
 
 # --- headers (single publish) ------------------------------------------------------------------
@@ -54,9 +83,14 @@ def parse_headers(text: str | None) -> list[tuple[str, bytes]]:
     """Headers from a JSON object (`{"a": "b"}`) or from `key=value` lines; blank means none."""
     if text is None or not text.strip():
         return []
-    if text.lstrip().startswith("{"):
-        return _headers_from_json(text)
-    return _headers_from_lines(text)
+    try:
+        if text.lstrip().startswith("{"):
+            return _headers_from_json(text)
+        return _headers_from_lines(text)
+    except UnicodeEncodeError:
+        raise ValidationFailed(
+            "headers: contains text that cannot be encoded as UTF-8", field="headers"
+        ) from None
 
 
 def _headers_from_json(text: str) -> list[tuple[str, bytes]]:
@@ -68,7 +102,7 @@ def _headers_from_json(text: str) -> list[tuple[str, bytes]]:
         ) from None
     if not isinstance(parsed, dict):
         raise ValidationFailed("headers: expected a JSON object", field="headers")
-    return [(name, _header_value(value)) for name, value in parsed.items()]
+    return [_header(name, value) for name, value in parsed.items()]
 
 
 def _headers_from_lines(text: str) -> list[tuple[str, bytes]]:
@@ -81,7 +115,7 @@ def _headers_from_lines(text: str) -> list[tuple[str, bytes]]:
             raise ValidationFailed(
                 f"headers: expected key=value, got {line.strip()!r}", field="headers"
             )
-        headers.append((name.strip(), value.encode()))
+        headers.append(_header(name.strip(), value.strip()))
     return headers
 
 
@@ -100,6 +134,14 @@ def parse_bulk(content: bytes, key_column: str | None, value_column: str | None)
     return parse_csv(content, key_column, value_column)
 
 
+def _too_many_rows() -> ValidationFailed:
+    return ValidationFailed(
+        f"The file has more than {MAX_BULK_ROWS:,} rows; split it into smaller files",
+        code="too_many_rows",
+        field="file",
+    )
+
+
 def _decode(content: bytes) -> str:
     try:
         return content.decode("utf-8-sig")
@@ -111,6 +153,7 @@ def parse_csv(content: bytes, key_column: str | None, value_column: str | None) 
     """One message per data row. The key column (if any) is the key; the value column (if any)
     is the value, else the whole row minus the key is a JSON object; the other columns are
     headers. Rows of the wrong width are `RowError`s."""
+    csv.field_size_limit(_CSV_FIELD_LIMIT)
     try:
         return _csv_items(_decode(content), key_column, value_column)
     except csv.Error as exc:
@@ -128,15 +171,19 @@ def _csv_items(text: str, key_column: str | None, value_column: str | None) -> l
 
     items: list[Item] = []
     for number, row in enumerate(rows, start=1):
+        if number > MAX_BULK_ROWS:
+            raise _too_many_rows()
         if len(row) != len(columns):
             items.append(RowError(number, f"Expected {len(columns)} columns, found {len(row)}"))
             continue
         cells = dict(zip(columns, row, strict=True))
-        key = cells.pop(key_column) if key_column is not None else ""
+        key = cells[key_column] if key_column is not None else ""
         if value_column is None:
-            value, headers = json.dumps(cells, ensure_ascii=False), {}
+            rest = {n: c for n, c in cells.items() if n != key_column}
+            value, headers = json.dumps(rest, ensure_ascii=False), {}
         else:
-            value, headers = cells.pop(value_column), cells
+            value = cells[value_column]  # may be the key column too: both get that cell
+            headers = {n: c for n, c in cells.items() if n not in (key_column, value_column)}
         items.append(
             OutMessage(
                 key=key.encode() if key else None,
@@ -148,15 +195,50 @@ def _csv_items(text: str, key_column: str | None, value_column: str | None) -> l
 
 
 def parse_json(content: bytes) -> list[Item]:
-    """An array of `{key?, value, headers?}` objects. A bad item is a `RowError`."""
+    """An array of `{key?, value, headers?}` objects. A bad item is a `RowError`.
+
+    The array is read item by item, so a file with more than `MAX_BULK_ROWS` items is refused
+    when the item over the cap is reached, not after the whole file was materialised.
+    """
     text = _decode(content)
-    try:
-        parsed = json.loads(text)
-    except (ValueError, RecursionError) as exc:
-        raise ValidationFailed(f"The file is not valid JSON ({exc})", field="file") from None
-    if not isinstance(parsed, list):
+    start = _skip_whitespace(text, 0)
+    if text[start : start + 1] != "[":
         raise ValidationFailed("The JSON file must be an array of messages", field="file")
-    return [_json_item(number, item) for number, item in enumerate(parsed, start=1)]
+    try:
+        items, end = _json_array_items(text, start + 1)
+    except json.JSONDecodeError as exc:
+        raise ValidationFailed(f"The file is not valid JSON ({exc})", field="file") from None
+    except RecursionError:
+        raise ValidationFailed(
+            "The file is not valid JSON (nested too deeply)", field="file"
+        ) from None
+    if _skip_whitespace(text, end) != len(text):
+        raise ValidationFailed(
+            "The file is not valid JSON (extra data after the array)", field="file"
+        )
+    return items
+
+
+def _json_array_items(text: str, position: int) -> tuple[list[Item], int]:
+    """The items of the array whose `[` precedes `position`, and the index after its `]`."""
+    decoder = json.JSONDecoder()
+
+    items: list[Item] = []
+    position = _skip_whitespace(text, position)
+    if text[position : position + 1] == "]":
+        return items, position + 1
+    while True:
+        if len(items) >= MAX_BULK_ROWS:
+            raise _too_many_rows()
+        item, position = decoder.raw_decode(text, position)
+        items.append(_json_item(len(items) + 1, item))
+        position = _skip_whitespace(text, position)
+        separator = text[position : position + 1]
+        if separator == "]":
+            return items, position + 1
+        if separator != ",":
+            raise json.JSONDecodeError("Expecting ',' delimiter", text, position)
+        position = _skip_whitespace(text, position + 1)
 
 
 def _json_item(number: int, item: Any) -> Item:
@@ -191,12 +273,12 @@ def _json_headers(headers: Any) -> list[tuple[str, bytes]]:
     if headers is None:
         return []
     if isinstance(headers, dict):
-        return [(name, _header_value(value)) for name, value in headers.items()]
+        return [_header(name, value) for name, value in headers.items()]
     pairs = headers if isinstance(headers, list) else None
     if pairs is not None and all(
         isinstance(p, list) and len(p) == 2 and isinstance(p[0], str) for p in pairs
     ):
-        return [(name, _header_value(value)) for name, value in pairs]
+        return [_header(name, value) for name, value in pairs]
     raise _BadItem("headers must be an object or a list of [name, value] pairs")
 
 
