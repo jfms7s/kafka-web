@@ -356,36 +356,54 @@ def test_offsets_for_times_error_for_an_unknown_partition_is_mapped() -> None:
         h.run(start="timestamp", timestamp=1234)
 
 
-def test_setup_calls_share_the_request_budget() -> None:
-    h = Harness(marks={0: (0, 5), 1: (0, 5)}, call_cost=0.6, times={0: 1, 1: 1})
+def test_setup_calls_share_one_ten_second_budget() -> None:
+    h = Harness(marks={0: (0, 5), 1: (0, 5)}, call_cost=3.0, times={0: 1, 1: 1})
 
     h.run(start="timestamp", timestamp=1234, timeout=2)
 
     c = h.consumer
-    # Each call is capped by what is left of the 2 s budget (and by its own 10 s cap).
-    assert c.metadata_timeouts == [pytest.approx(2.0)]
-    assert c.watermark_timeouts == [pytest.approx(1.4), pytest.approx(0.8)]
-    assert c.times_timeouts == [pytest.approx(0.2)]
+    # Each call is capped by what is left of the 10 s setup budget, whatever `timeout` is.
+    assert c.metadata_timeouts == [pytest.approx(10.0)]
+    assert c.watermark_timeouts == [pytest.approx(7.0), pytest.approx(4.0)]
+    assert c.times_timeouts == [pytest.approx(1.0)]
 
 
-def test_budget_spent_during_setup_is_a_504_not_an_unbounded_wait() -> None:
-    h = Harness(marks={0: (0, 5), 1: (0, 5)}, call_cost=3.0)
+def test_setup_exceeding_its_budget_is_a_504_not_an_unbounded_wait() -> None:
+    h = Harness(marks={0: (0, 5), 1: (0, 5)}, call_cost=6.0)
 
     with pytest.raises(KafkaTimeout):
-        h.run(start="earliest", timeout=2)
+        h.run(start="earliest", timeout=60)
 
-    assert len(h.consumer.watermark_timeouts) == 0  # no further call once the budget is gone
+    assert h.consumer.watermark_timeouts == [pytest.approx(4.0)]  # the second one never started
+    assert h.consumer.poll_timeouts == []
     assert h.consumer.closed
 
 
-def test_polling_gets_only_what_setup_left_over() -> None:
+def test_collection_window_is_the_full_timeout_after_setup() -> None:
     h = Harness(marks={0: (0, 5)}, call_cost=0.5)
 
     h.run(start="earliest", timeout=2)
 
-    # metadata 0.5 + watermark 0.5 -> 1 s left for polling
-    assert sum(h.consumer.poll_timeouts) == pytest.approx(1.0)
-    assert h.clock.now == pytest.approx(1002.0)  # the whole request took exactly `timeout`
+    assert sum(h.consumer.poll_timeouts) == pytest.approx(2.0)
+    assert h.clock.now == pytest.approx(1000 + 1.0 + 2.0)  # setup + the whole window
+
+
+def test_slow_setup_does_not_eat_a_short_timeout() -> None:
+    h = Harness(marks={0: (0, 5)}, call_cost=1.5)  # 3 s of setup
+
+    result = h.run(start="earliest", timeout=1)
+
+    assert result == []
+    assert sum(h.consumer.poll_timeouts) == pytest.approx(1.0)  # still collects for 1 s
+
+
+def test_worst_case_wall_time_is_setup_budget_plus_timeout() -> None:
+    h = Harness(marks={0: (0, 5)}, call_cost=4.99)  # just inside the setup budget
+
+    h.run(start="earliest", timeout=3)
+
+    assert h.clock.now - 1000 == pytest.approx(2 * 4.99 + 3)
+    assert h.clock.now - 1000 <= 10 + 3
 
 
 def test_a_call_never_waits_longer_than_its_own_cap_even_with_a_big_budget() -> None:

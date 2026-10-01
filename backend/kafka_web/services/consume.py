@@ -19,7 +19,10 @@ from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception
 from kafka_web.services.decode import MessageView, to_message_view
 from kafka_web.services.offsets import StartMode, end_offsets, is_done, plan_start_offsets
 
-CALL_TIMEOUT_S = 10.0  # metadata, watermark and offsets-for-times calls
+CALL_TIMEOUT_S = 10.0  # one metadata, watermark or offsets-for-times call
+# All setup calls together (metadata + watermarks + offsets-for-times) share this budget; the
+# collection window (`params.timeout`) starts afterwards, so worst case is about 10 s + timeout.
+SETUP_BUDGET_S = 10.0
 POLL_SLICE_S = 0.5  # longest single poll: keeps the deadline check responsive
 
 logger = logging.getLogger(__name__)
@@ -47,11 +50,11 @@ def _validate(params: SnapshotParams) -> None:
 
 
 class _Budget:
-    """One deadline for the whole request: setup calls and polling draw from the same `timeout`."""
+    """A deadline that several blocking calls draw from."""
 
-    def __init__(self, timeout: float, clock: Callable[[], float]):
+    def __init__(self, duration: float, clock: Callable[[], float]):
         self._clock = clock
-        self.deadline = clock() + timeout
+        self.deadline = clock() + duration
 
     def remaining(self) -> float:
         return self.deadline - self._clock()
@@ -60,7 +63,7 @@ class _Budget:
         """Timeout for one blocking call: its own cap, or what is left if that is less."""
         remaining = self.remaining()
         if remaining <= 0:
-            raise KafkaTimeout("The snapshot ran out of time before it could start reading")
+            raise KafkaTimeout("Kafka did not answer the snapshot setup calls in time")
         return min(CALL_TIMEOUT_S, remaining)
 
 
@@ -169,24 +172,24 @@ def consume_snapshot(
     clock: Callable[[], float] = time.monotonic,
 ) -> list[MessageView]:
     _validate(params)
-    budget = _Budget(params.timeout, clock)
     consumer = call_with_timeout(lambda: consumer_factory(_consumer_config(client_config)))
     try:
-        return _snapshot(consumer, topic, params, budget)
+        return _snapshot(consumer, topic, params, clock)
     finally:
         with contextlib.suppress(Exception):  # a failing close must not mask the real outcome
             consumer.close()
 
 
 def _snapshot(
-    consumer: Consumer, topic: str, params: SnapshotParams, budget: _Budget
+    consumer: Consumer, topic: str, params: SnapshotParams, clock: Callable[[], float]
 ) -> list[MessageView]:
-    partitions = _partition_ids(consumer, topic, params.partition, budget)
-    watermarks = _watermarks(consumer, topic, partitions, budget)
+    setup = _Budget(SETUP_BUDGET_S, clock)
+    partitions = _partition_ids(consumer, topic, params.partition, setup)
+    watermarks = _watermarks(consumer, topic, partitions, setup)
     lookup = None
     if params.start == "timestamp":
         assert params.timestamp is not None  # _validate
-        lookup = _timestamp_offsets(consumer, topic, partitions, params.timestamp, budget)
+        lookup = _timestamp_offsets(consumer, topic, partitions, params.timestamp, setup)
     plan = plan_start_offsets(
         params.start,
         watermarks,
@@ -204,6 +207,8 @@ def _snapshot(
     # `latest` reads every planned range completely (about `count` messages in all) and trims
     # afterwards: stopping at the first `count` arrivals could drop the newest of another partition.
     limit = None if params.start == "latest" else params.count
-    messages = _poll_until_done(consumer, plan, ends, limit=limit, budget=budget)
+    messages = _poll_until_done(
+        consumer, plan, ends, limit=limit, budget=_Budget(params.timeout, clock)
+    )
     messages.sort(key=lambda m: (m.timestamp or 0, m.partition, m.offset))
     return messages[-params.count :] if params.start == "latest" else messages
