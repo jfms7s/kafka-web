@@ -554,6 +554,7 @@ class FakeGroupAdmin:
         self.delete_calls: list[list[str]] = []
         self.spec_calls: list[tuple[str, int, str]] = []
         self.kwargs_seen: list[dict[str, Any]] = []
+        self.list_topics_calls: list[dict[str, Any]] = []
 
     def poll(self, timeout: float | None = None) -> int:
         return 0
@@ -561,6 +562,7 @@ class FakeGroupAdmin:
     def list_topics(self, topic: str | None = None, timeout: float | None = None):
         from confluent_kafka.admin import ClusterMetadata
 
+        self.list_topics_calls.append({"topic": topic, "timeout": timeout})
         meta = ClusterMetadata()
         meta.topics = {
             name: topic_meta(name, [partition(i, 1, [1], [1]) for i in range(count)])

@@ -22,6 +22,7 @@ from confluent_kafka.admin import AdminClient, ConsumerGroupDescription, OffsetS
 
 from kafka_web.errors import AppError, BrokerError, Conflict, NotFound, ValidationFailed
 from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception
+from kafka_web.kafka.topic_lookup import topic_partition_ids
 
 DEFAULT_TIMEOUT_S = 10.0
 
@@ -262,13 +263,7 @@ def describe_group(
 
 
 def _topic_partitions(admin: AdminClient, topic: str, timeout: float) -> list[int]:
-    metadata = call_with_timeout(lambda: admin.list_topics(topic=topic, timeout=timeout))
-    found = metadata.topics.get(topic)
-    if found is not None and found.error is not None:
-        raise map_kafka_exception(found.error)
-    if found is None or not found.partitions:
-        raise NotFound(f"Topic {topic!r} does not exist", code="topic_not_found")
-    return sorted(found.partitions)
+    return topic_partition_ids(admin, topic, timeout)
 
 
 def _resolved(

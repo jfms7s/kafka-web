@@ -109,6 +109,26 @@ def test_get_connects_lazily(store: ClusterStore, registry: ConnectionRegistry, 
     assert all(isinstance(v, str) for v in conn.client_config.values())
 
 
+def test_extra_cannot_turn_topic_auto_creation_back_on(
+    store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes
+):
+    # Viewing a missing topic must never create it, whatever the user's `extra` says.
+    store.create(plaintext(extra={"allow.auto.create.topics": "true"}))
+    registry.get("dev")
+    [admin] = fakes.admins
+    [producer] = fakes.producers
+    assert admin.conf["allow.auto.create.topics"] == "false"
+    assert producer.conf["allow.auto.create.topics"] == "false"
+
+
+def test_test_connection_admin_never_auto_creates_topics(
+    registry: ConnectionRegistry, fakes: Fakes
+):
+    registry.test(plaintext(extra={"allow.auto.create.topics": "true"}), None)
+    [admin] = fakes.admins
+    assert admin.conf["allow.auto.create.topics"] == "false"
+
+
 def test_second_get_reuses_connection(
     store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes
 ):

@@ -114,6 +114,21 @@ def kafka_plaintext() -> Iterator[str]:
 
 
 @pytest.fixture
+def auto_create_kafka() -> Iterator[str]:
+    """Bootstrap of a broker of its own that *would* create a topic on first use."""
+    [port] = _free_ports(1)
+    env = {**_plaintext_env(port), "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "true"}
+    container = _start(env, [port], {})
+    try:
+        bootstrap = f"localhost:{port}"
+        _wait_ready(container, {"bootstrap.servers": bootstrap})
+        yield bootstrap
+    finally:
+        with contextlib.suppress(Exception):
+            container.stop()
+
+
+@pytest.fixture
 def disposable_kafka() -> Iterator[tuple[str, DockerContainer]]:
     """`(bootstrap, container)` of a PLAINTEXT broker of the test's own, which it may stop."""
     [port] = _free_ports(1)

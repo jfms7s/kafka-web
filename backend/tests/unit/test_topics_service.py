@@ -66,7 +66,8 @@ def test_describe_topic_partitions_sorted_and_rf_from_first_partition() -> None:
         PartitionDetail(0, 1, [1, 2, 3], [1, 2, 3]),
         PartitionDetail(1, 2, [2, 3, 1], [2, 3]),
     ]
-    assert admin.list_topics_calls == [{"topic": "orders", "timeout": 10.0}]
+    # The brokers must never be asked about one topic by name: that can auto-create it.
+    assert admin.list_topics_calls == [{"topic": None, "timeout": 10.0}]
 
 
 def test_describe_topic_entries_non_default_first_then_by_name() -> None:
@@ -189,3 +190,13 @@ def test_source_given_as_a_raw_int_is_named() -> None:
     [view] = describe_topic(admin, "orders").entries
 
     assert view.source == "DYNAMIC_TOPIC_CONFIG"
+
+
+def test_describe_topic_of_a_missing_topic_is_not_found_without_asking_by_name() -> None:
+    admin = FakeTopicAdmin({"orders": orders_meta()})
+
+    with pytest.raises(NotFound) as caught:
+        describe_topic(admin, "ghost")
+
+    assert caught.value.code == "topic_not_found"
+    assert all(call["topic"] is None for call in admin.list_topics_calls)
