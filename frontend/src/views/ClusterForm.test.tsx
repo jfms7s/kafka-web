@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -269,6 +269,65 @@ describe('ClusterForm edit', () => {
     await user.clear(env)
     await user.type(env, 'prd')
     expect(screen.getByLabelText('Read-only')).not.toBeChecked()
+  })
+})
+
+describe('ClusterForm saved SASL password', () => {
+  it('refuses to save a SASL cluster that has no saved password and none typed', async () => {
+    mockFetch(() => Response.json({ ...SAVED, has_sasl_password: false }))
+    const user = renderForm('/clusters/stg-eu/edit')
+    const password = await screen.findByLabelText('SASL password')
+    expect(password).not.toHaveAttribute('placeholder', expect.stringMatching(/leave blank/i))
+    expect(password).toBeRequired()
+
+    // The browser's own `required` check stops a click on Save; submit directly to reach ours.
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(0)
+    fireEvent.submit(password.closest('form')!)
+
+    expect(await screen.findByText('Password is required (none is saved)')).toBeInTheDocument()
+    expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(0)
+  })
+
+  it('accepts a typed password when none is saved', async () => {
+    mockFetch(() => Response.json({ ...SAVED, has_sasl_password: false }))
+    const user = renderForm('/clusters/stg-eu/edit')
+    await user.type(await screen.findByLabelText('SASL password'), 'new-secret')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(1))
+    expect(await bodyOf(callsTo('PUT', '/api/clusters/stg-eu')[0])).toMatchObject({
+      sasl_password: 'new-secret',
+    })
+  })
+
+  it('requires a password when an existing non-SASL cluster is switched to SASL', async () => {
+    mockFetch(() =>
+      Response.json({
+        ...SAVED,
+        security_protocol: 'PLAINTEXT',
+        sasl_mechanism: null,
+        sasl_username: null,
+        has_sasl_password: false,
+        truststore: null,
+      }),
+    )
+    const user = renderForm('/clusters/stg-eu/edit')
+    await user.selectOptions(await screen.findByLabelText('Security protocol'), 'SASL_PLAINTEXT')
+    await user.type(screen.getByLabelText('SASL username'), 'svc')
+    expect(screen.getByLabelText('SASL password')).toBeRequired()
+    fireEvent.submit(screen.getByLabelText('SASL password').closest('form')!)
+    expect(await screen.findByText('Password is required (none is saved)')).toBeInTheDocument()
+    expect(callsTo('PUT', '/api/clusters/stg-eu')).toHaveLength(0)
+  })
+
+  it('keeps the keep-blank hint when a password is saved', async () => {
+    mockFetch(editHandler)
+    renderForm('/clusters/stg-eu/edit')
+    expect(await screen.findByLabelText('SASL password')).toHaveAttribute(
+      'placeholder',
+      expect.stringMatching(/leave blank to keep/i),
+    )
+    expect(screen.getByLabelText('SASL password')).not.toBeRequired()
   })
 })
 

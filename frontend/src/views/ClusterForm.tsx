@@ -17,6 +17,7 @@ type Mechanism = ClusterInput['sasl_mechanism'] & string
 const PROTOCOLS: Protocol[] = ['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL']
 const MECHANISMS: Mechanism[] = ['PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512']
 const TRUSTSTORE_REQUIRED = 'Truststore is required for TLS'
+const NO_PASSWORD = 'Password is required (none is saved)'
 const KEEP_HINT = 'Leave blank to keep the saved value'
 
 const usesTls = (p: Protocol) => p === 'SSL' || p === 'SASL_SSL'
@@ -138,6 +139,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
 
   const tls = usesTls(form.protocol)
   const sasl = usesSasl(form.protocol)
+  const hasSavedPassword = saved?.has_sasl_password === true
   const hasSavedTruststore = editing && (saved.truststore?.length ?? 0) > 0
 
   function changeEnv(env: string) {
@@ -168,6 +170,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
     const problems: FieldErrors = {}
     const truststore = file?.base64 ?? form.pastedTruststore.trim()
     if (tls && !truststore && !hasSavedTruststore) problems.truststore = TRUSTSTORE_REQUIRED
+    if (sasl && !form.password && !hasSavedPassword) problems.sasl_password = NO_PASSWORD
     const extra = parseExtra(form.extra)
     if ('badLine' in extra) problems.extra = `Line ${extra.badLine} must look like key=value`
     setErrors(problems)
@@ -330,9 +333,9 @@ function FormBody({ saved }: { saved?: ClusterView }) {
             <input
               {...fieldProps('sasl_password')}
               type="password"
-              required={!editing}
+              required={!hasSavedPassword}
               autoComplete="new-password"
-              placeholder={editing ? KEEP_HINT : ''}
+              placeholder={hasSavedPassword ? KEEP_HINT : ''}
               value={form.password}
               onChange={(e) => set('password', e.target.value)}
               className={INPUT}
