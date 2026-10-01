@@ -157,18 +157,18 @@ def test_slow_connect_does_not_block_other_clusters(
 ):
     store.create(plaintext("slow", bootstrap_servers="slow:9092"))
     store.create(plaintext("fast", bootstrap_servers="fast:9092"))
-    release = threading.Event()
+    entered, release = threading.Event(), threading.Event()
 
     def check(admin):
         if admin.conf["bootstrap.servers"] == "slow:9092":
+            entered.set()
             release.wait(timeout=5)
         return object()
 
     fakes.on_list_topics = check
     slow = threading.Thread(target=registry.get, args=("slow",))
     slow.start()
-    while not fakes.admins:
-        time.sleep(0.005)
+    assert entered.wait(timeout=5)
     try:
         assert registry.get("fast").name == "fast"
         assert not registry.is_connected("slow")
