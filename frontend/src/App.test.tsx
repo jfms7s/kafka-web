@@ -8,11 +8,12 @@ import { ToastProvider } from './components/Toasts'
 function renderAt(path: string) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (request: Request) =>
-      new URL(request.url).pathname === '/api/status'
-        ? Response.json({ connections: [] })
-        : Response.json([]),
-    ),
+    vi.fn(async (request: Request) => {
+      const path = new URL(request.url).pathname
+      if (path === '/api/status') return Response.json({ connections: [] })
+      if (path.endsWith('/topics')) return Response.json({ topics: [] })
+      return Response.json([])
+    }),
   )
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -38,9 +39,16 @@ describe('App routes', () => {
     expect(await screen.findByRole('heading', { name: 'Add cluster' })).toBeInTheDocument()
   })
 
-  it('/c/:cluster/topics shows the placeholder', async () => {
+  it('/c/:cluster/topics shows the topic browser', async () => {
     renderAt('/c/dev/topics')
-    expect(await screen.findByText('Topics — coming in Task 5')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Topics' })).toBeInTheDocument()
+    expect(await screen.findByText('0 topics')).toBeInTheDocument()
+  })
+
+  it('/c/:cluster/topics/:topic shows the topic detail', async () => {
+    renderAt('/c/dev/topics/orders')
+    expect(await screen.findByRole('heading', { name: 'orders' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Config' })).toBeInTheDocument()
   })
 
   it('/c/:cluster/groups shows the placeholder', async () => {

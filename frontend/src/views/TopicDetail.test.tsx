@@ -1,0 +1,76 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { TopicDetail } from './TopicDetail'
+
+function Search() {
+  return <output data-testid="search">{useLocation().search}</output>
+}
+
+function setup(entry: string) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json({ name: 't', replication_factor: 1, partitions: [], entries: [] }),
+    ),
+  )
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[entry]}>
+        <Routes>
+          <Route
+            path="/c/:cluster/topics/:topic"
+            element={
+              <>
+                <TopicDetail />
+                <Search />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+  return userEvent.setup()
+}
+
+afterEach(() => vi.unstubAllGlobals())
+
+describe('TopicDetail', () => {
+  it('shows the decoded topic name and the four tabs', () => {
+    setup('/c/dev/topics/orders.v1_x-y')
+
+    expect(screen.getByRole('heading', { name: 'orders.v1_x-y' })).toBeInTheDocument()
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+      'Messages',
+      'Live',
+      'Config',
+      'Publish',
+    ])
+  })
+
+  it('renders the tab named in ?tab= and falls back for unknown values', async () => {
+    setup('/c/dev/topics/t?tab=config')
+    expect(screen.getByRole('tab', { name: 'Config' })).toHaveAttribute('aria-selected', 'true')
+    expect(await screen.findByText(/0 partitions/)).toBeInTheDocument()
+  })
+
+  it('falls back to the first tab for an unknown ?tab=', () => {
+    setup('/c/dev/topics/t?tab=bogus')
+
+    expect(screen.getByRole('tab', { name: 'Messages' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('switches tabs through the URL and shows placeholders for unbuilt tabs', async () => {
+    const user = setup('/c/dev/topics/t?tab=config')
+
+    await user.click(screen.getByRole('tab', { name: 'Live' }))
+
+    expect(screen.getByTestId('search')).toHaveTextContent('?tab=live')
+    expect(screen.getByRole('tab', { name: 'Live' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('Coming soon')).toBeInTheDocument()
+  })
+})

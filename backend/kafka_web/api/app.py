@@ -15,7 +15,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import Scope
 
-from kafka_web.api import clusters
+from kafka_web.api import clusters, topics
 from kafka_web.api.security import LOCAL_HOSTS, LocalOriginMiddleware
 from kafka_web.config.paths import config_dir
 from kafka_web.config.secrets import SecretStore
@@ -117,6 +117,7 @@ def create_app(
     app.add_exception_handler(Exception, _unexpected_error)
 
     app.include_router(clusters.router, prefix="/api")
+    app.include_router(topics.router, prefix="/api")
     if static_dir is not None:
         app.mount("/", SpaStaticFiles(directory=static_dir, html=True), name="static")
     return app

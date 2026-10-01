@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from kafka_web.config.models import SaslMechanism, SecurityProtocol
 
@@ -45,3 +45,45 @@ class StatusView(BaseModel):
 
 class ConnectionTestResult(BaseModel):
     ok: bool
+
+
+class TopicSummaryView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    partitions: int
+    replication_factor: int
+    internal: bool
+
+
+class TopicListView(BaseModel):
+    topics: list[TopicSummaryView]
+
+
+class PartitionView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    leader: int
+    replicas: list[int]
+    isr: list[int]
+
+
+class ConfigEntryItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    value: str | None
+    display_value: str | None
+    is_default: bool
+    source: str
+    sensitive: bool
+
+
+class TopicConfigView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    partitions: list[PartitionView]
+    replication_factor: int
+    entries: list[ConfigEntryItem]
