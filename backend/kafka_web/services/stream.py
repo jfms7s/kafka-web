@@ -1,9 +1,9 @@
 """Live streaming (spec §4): a consumer thread feeding a bounded, drop-oldest queue.
 
 The worker owns a throwaway-group consumer (same footprint rules as snapshot reads: `assign()`
-only, never subscribe or commit) and polls until its stop event is set. The WebSocket bridge
-(`api/stream.py`) drains the queue; it never touches the consumer, so no librdkafka call ever
-runs on the event loop.
+only, never subscribe or commit) and polls until its stop event is set, queueing raw messages.
+The WebSocket bridge (`api/stream.py`) drains, decodes and serialises them in a worker thread;
+it never touches the consumer, so no librdkafka call or bulk decoding runs on the event loop.
 """
 
 import contextlib
@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any, Literal
 
-from confluent_kafka import OFFSET_END, Consumer, KafkaError, TopicPartition
+from confluent_kafka import OFFSET_END, Consumer, KafkaError, Message, TopicPartition
 from pydantic import BaseModel, Field
 
 from kafka_web.errors import AppError
@@ -27,7 +27,6 @@ from kafka_web.services.consume import (
     lookup_timestamp_offsets,
     partition_ids,
 )
-from kafka_web.services.decode import MessageView, to_message_view
 from kafka_web.services.offsets import plan_start_offsets
 
 QUEUE_SIZE = 1000
@@ -46,24 +45,28 @@ class StreamParams(BaseModel):
     partition: int | None = None
 
 
-class BoundedDropQueue:
-    """Thread-safe FIFO of at most `maxsize` messages; when full, `put` drops the oldest."""
+class BoundedDropQueue[T]:
+    """Thread-safe FIFO of at most `maxsize` items; when full, `put` drops the oldest.
+
+    The worker queues raw consumer messages: decoding is left to whoever drains, so the messages
+    dropped on overflow (most of them, when replaying a backlog) are never decoded.
+    """
 
     def __init__(self, maxsize: int = QUEUE_SIZE):
-        self._items: deque[MessageView] = deque()
+        self._items: deque[T] = deque()
         self._maxsize = maxsize
         self._dropped = 0
         self._lock = threading.Lock()
 
-    def put(self, item: MessageView) -> None:
+    def put(self, item: T) -> None:
         with self._lock:
             if len(self._items) >= self._maxsize:
                 self._items.popleft()
                 self._dropped += 1
             self._items.append(item)
 
-    def drain(self, max_items: int = 100) -> tuple[list[MessageView], int]:
-        """Up to `max_items` oldest messages, and how many were dropped since the last drain."""
+    def drain(self, max_items: int = 100) -> tuple[list[T], int]:
+        """Up to `max_items` oldest items, and how many were dropped since the last drain."""
         with self._lock:
             count = min(max_items, len(self._items))
             items = [self._items.popleft() for _ in range(count)]
@@ -79,7 +82,7 @@ class StreamWorker(threading.Thread):
         client_config: dict[str, str],
         topic: str,
         params: StreamParams,
-        queue: BoundedDropQueue,
+        queue: BoundedDropQueue[Message],
         stop: threading.Event,
         consumer_factory: Callable[[dict[str, Any]], Consumer] = Consumer,
         poll_interval: float = POLL_INTERVAL_S,
@@ -148,7 +151,7 @@ class StreamWorker(threading.Thread):
                 continue
             err = msg.error()
             if err is None:
-                self.queue.put(to_message_view(msg))
+                self.queue.put(msg)
             elif err.code() in _TRANSIENT_ERRORS:
                 logger.info("Live stream on %r: transient error %s", self._topic, err.name())
             elif err.code() != KafkaError._PARTITION_EOF:

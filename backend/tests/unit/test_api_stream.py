@@ -1,3 +1,5 @@
+import asyncio
+import json
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -368,3 +370,58 @@ def test_cluster_closed_before_registration_sends_closed_without_consuming(
         assert close_code(ws) == 1001
 
     assert consumers.created == []
+
+
+# --- frame building ---------------------------------------------------------------------------
+
+
+def test_encode_batch_decodes_only_the_messages_it_keeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    decoded: list[int] = []
+    real = stream_api.to_message_view
+
+    def counting(msg: Any) -> Any:
+        decoded.append(msg.offset())
+        return real(msg)
+
+    monkeypatch.setattr(stream_api, "to_message_view", counting)
+    queue: BoundedDropQueue[Any] = BoundedDropQueue(maxsize=2)
+    for i in range(10):
+        queue.put(FakeMessage(offset=i, value=b'{"n": 1}'))
+
+    batch = stream_api.encode_batch(queue)
+
+    assert decoded == [8, 9]  # the 8 dropped messages were never decoded
+    assert batch.count == 2
+    dropped, messages = (json.loads(text) for text in batch.frames)
+    assert dropped == {"type": "dropped", "count": 8}
+    assert messages["type"] == "messages"
+    assert [m["offset"] for m in messages["items"]] == [8, 9]
+    assert messages["items"][0]["value"]["json_value"] == {"n": 1}
+
+
+def test_encode_batch_of_an_empty_queue_has_no_frames() -> None:
+    batch = stream_api.encode_batch(BoundedDropQueue())
+    assert (batch.frames, batch.count) == ([], 0)
+
+
+def test_frames_are_built_off_the_event_loop(
+    client: TestClient, consumers: LiveConsumers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    on_loop: list[bool] = []
+    real = stream_api.encode_batch
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(stream_api, "encode_batch", spy)
+    with client.websocket_connect(URL) as ws:
+        streaming(consumers).feed(FakeMessage(offset=1))
+        receive_items(ws, 1)
+
+    assert on_loop
+    assert not any(on_loop)

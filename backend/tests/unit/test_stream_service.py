@@ -1,5 +1,6 @@
 import threading
 import time
+from typing import Any
 
 import pytest
 from confluent_kafka import OFFSET_END, KafkaError, KafkaException
@@ -149,8 +150,8 @@ def started(consumers: LiveConsumers) -> LiveFakeConsumer:
     return consumer
 
 
-def wait_for(queue: BoundedDropQueue, count: int, timeout: float = 2.0) -> list[MessageView]:
-    collected: list[MessageView] = []
+def wait_for(queue: BoundedDropQueue, count: int, timeout: float = 2.0) -> list[Any]:
+    collected: list[Any] = []
     deadline = time.monotonic() + timeout
     while len(collected) < count and time.monotonic() < deadline:
         collected += queue.drain()[0]
@@ -227,17 +228,19 @@ def test_consumer_has_no_group_footprint_and_no_eof_events() -> None:
     assert all(t is not None for t in consumer.metadata_timeouts)
 
 
-def test_polled_messages_are_decoded_into_the_queue() -> None:
+def test_polled_messages_are_queued_raw_without_decoding() -> None:
+    """Decoding happens when the bridge drains: messages dropped on overflow are never decoded."""
     consumers = LiveConsumers()
     worker, queue, stop = start_worker(consumers)
     consumer = started(consumers)
+    first, second = FakeMessage(offset=7, value=b'{"a": 1}'), FakeMessage(offset=8)
 
-    consumer.feed(FakeMessage(offset=7, key=b"k", value=b'{"a": 1}'), eof(0), FakeMessage(offset=8))
+    consumer.feed(first, eof(0), second)
     messages = wait_for(queue, 2)
     stopped(worker, stop)
 
-    assert [m.offset for m in messages] == [7, 8]
-    assert messages[0].value.json_value == {"a": 1}
+    assert messages[0] is first
+    assert messages[1] is second
     assert worker.error is None
 
 
@@ -333,7 +336,7 @@ def test_transient_disconnect_event_does_not_end_the_stream() -> None:
 
     assert worker.is_alive()
     stopped(worker, stop)
-    assert [m.offset for m in messages] == [3]
+    assert [m.offset() for m in messages] == [3]
     assert worker.error is None
 
 

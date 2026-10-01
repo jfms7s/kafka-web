@@ -6,17 +6,20 @@ Frames sent: `{"type": "messages", "items": [...]}` (at most 100 per frame, flus
 then close 1001 when the cluster is edited, deleted or disconnected. The client may send the
 text `"stop"`; any other text is ignored.
 
-The event loop never makes a librdkafka call: the worker thread owns the consumer, the bridge only
-drains the queue, and the blocking registry/join calls run in worker threads (`to_thread`).
+The event loop never makes a librdkafka call and never decodes or serialises messages: the worker
+thread owns the consumer, and draining + decoding + JSON (`encode_batch`) as well as the blocking
+registry/join calls run in worker threads (`to_thread`); the loop only sends ready text frames.
 """
 
 import asyncio
 import contextlib
+import json
 import logging
 import threading
 from dataclasses import dataclass
 from typing import Any
 
+from confluent_kafka import Message
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 
@@ -24,6 +27,7 @@ from kafka_web.api.security import request_is_same_origin
 from kafka_web.errors import AppError, BrokerError, ValidationFailed
 from kafka_web.kafka.registry import ConnectionRegistry
 from kafka_web.services.consume import validate_start
+from kafka_web.services.decode import to_message_view
 from kafka_web.services.stream import BoundedDropQueue, StreamParams, StreamWorker
 
 router = APIRouter()
@@ -51,6 +55,28 @@ class _End:
 _CLIENT_STOPPED = _End(code=_CLOSE_NORMAL)
 _CLIENT_GONE = _End()
 _CLUSTER_CHANGED = _End({"type": "closed", "reason": "cluster_changed"}, _CLOSE_GOING_AWAY)
+
+
+@dataclass(frozen=True)
+class Batch:
+    frames: list[str]  # JSON text frames, in send order
+    count: int  # messages drained into them
+
+
+def encode_batch(queue: BoundedDropQueue[Message], max_items: int = BATCH_SIZE) -> Batch:
+    """Drain up to `max_items` raw messages and build the text frames for them.
+
+    Blocking CPU work (decoding, JSON): the bridge runs it in a worker thread. Only the messages
+    that survived the queue's drop-oldest policy are ever decoded.
+    """
+    raw, dropped = queue.drain(max_items)
+    frames = []
+    if dropped:
+        frames.append(json.dumps({"type": "dropped", "count": dropped}))
+    if raw:
+        items = ",".join(to_message_view(msg).model_dump_json() for msg in raw)
+        frames.append(f'{{"type":"messages","items":[{items}]}}')
+    return Batch(frames, len(raw))
 
 
 def _error_end(exc: AppError, code: int) -> _End:
@@ -136,26 +162,23 @@ async def _run(
 
 
 async def _pump(
-    ws: WebSocket, queue: BoundedDropQueue, worker: StreamWorker, stop: threading.Event
+    ws: WebSocket, queue: BoundedDropQueue[Message], worker: StreamWorker, stop: threading.Event
 ) -> _End:
     receiver = asyncio.create_task(_receive(ws, stop))
     try:
         while True:
             alive = worker.is_alive()  # before draining: a dead worker's queue is final
-            items, dropped = queue.drain(BATCH_SIZE)
-            if dropped:
-                await ws.send_json({"type": "dropped", "count": dropped})
-            if items:
-                frame = {"type": "messages", "items": [m.model_dump(mode="json") for m in items]}
-                await ws.send_json(frame)
+            batch = await asyncio.to_thread(encode_batch, queue)
+            for text in batch.frames:
+                await ws.send_text(text)
             if receiver.done():
                 return receiver.result()
             if stop.is_set():  # set by the registry: the cluster was edited/deleted/disconnected
                 return _CLUSTER_CHANGED
-            if not alive and len(items) < BATCH_SIZE:
+            if not alive and batch.count < BATCH_SIZE:
                 error = worker.error or BrokerError("The live stream ended unexpectedly")
                 return _error_end(error, _CLOSE_ERROR)
-            if len(items) < BATCH_SIZE:  # a full batch is flushed again right away
+            if batch.count < BATCH_SIZE:  # a full batch is flushed again right away
                 await asyncio.wait([receiver], timeout=FLUSH_INTERVAL_S)
     except WebSocketDisconnect:
         stop.set()
