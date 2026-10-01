@@ -6,8 +6,8 @@ final say: a consumer can join between the check and the write, and the broker's
 (NON_EMPTY_GROUP, UNKNOWN_MEMBER_ID, ...) is surfaced as the same 409 `group_not_empty`.
 """
 
+import time
 from collections.abc import Callable
-from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -39,7 +39,14 @@ _ACTIVE_GROUP_CODES = {
     KafkaError.FENCED_MEMBER_EPOCH,
     KafkaError.STALE_MEMBER_EPOCH,
 }
-_NO_COMMITTED_OFFSET = -1001  # librdkafka OFFSET_INVALID
+# Group requests go to the group's coordinator, which is briefly unavailable right after the
+# broker starts, when the offsets topic is first created, and while it moves.
+_COORDINATOR_FLUX_CODES = {
+    KafkaError.NOT_COORDINATOR,
+    KafkaError.COORDINATOR_NOT_AVAILABLE,
+    KafkaError.COORDINATOR_LOAD_IN_PROGRESS,
+}
+RETRY_DELAY_S = 0.25
 
 
 @dataclass(frozen=True)
@@ -103,21 +110,38 @@ def _as_app_error(failure: BaseException | KafkaError, *, write: bool = False) -
     return map_kafka_exception(failure)
 
 
-def _wait[T](future: Future[T], timeout: float, *, write: bool = False) -> T:
-    try:
-        return future.result(timeout=timeout)
-    except Exception as exc:
-        raise _as_app_error(exc, write=write) from None
+def _run_group_request[T](fn: Callable[[], T], timeout: float, *, write: bool = False) -> T:
+    """Run one coordinator-bound admin round trip (issue the call *and* wait for its result).
+
+    Raw failures (`KafkaException`, a partition's `KafkaError` raised as one) are mapped here. The
+    ones that mean "the coordinator is moving" are retried until `timeout` has passed.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return fn()
+        except Exception as exc:
+            error = _kafka_error(exc)
+            flux = error is not None and error.code() in _COORDINATOR_FLUX_CODES
+            if flux and time.monotonic() + RETRY_DELAY_S < deadline:
+                time.sleep(RETRY_DELAY_S)
+                continue
+            raise _as_app_error(exc, write=write) from None
 
 
-def _guard[T](fn: Callable[[], T]) -> T:
-    return call_with_timeout(fn)
+def _raise_partition_error(tp: TopicPartition) -> None:
+    if tp.error is not None:
+        raise KafkaException(tp.error)
 
 
 def _describe(admin: AdminClient, group_id: str, timeout: float) -> ConsumerGroupDescription:
     """The group's description; a group that does not exist (DEAD, GROUP_ID_NOT_FOUND) is a 404."""
-    futures = _guard(lambda: admin.describe_consumer_groups([group_id], request_timeout=timeout))
-    description = _wait(futures[group_id], timeout)
+    description = _run_group_request(
+        lambda: admin.describe_consumer_groups([group_id], request_timeout=timeout)[
+            group_id
+        ].result(timeout=timeout),
+        timeout,
+    )
     if description.state == ConsumerGroupState.DEAD:
         raise NotFound(f"Consumer group {group_id!r} does not exist", code="group_not_found")
     return description
@@ -135,8 +159,9 @@ def _require_empty(description: ConsumerGroupDescription, group_id: str) -> None
 def list_groups(
     admin: AdminClient, filter: str | None = None, timeout: float = DEFAULT_TIMEOUT_S
 ) -> list[GroupSummary]:
-    future = _guard(lambda: admin.list_consumer_groups(request_timeout=timeout))
-    result = _wait(future, timeout)
+    result = call_with_timeout(
+        lambda: admin.list_consumer_groups(request_timeout=timeout).result(timeout=timeout)
+    )
     if result.errors:  # a partial list would silently hide groups
         raise _as_app_error(result.errors[0])
     needle = (filter or "").lower()
@@ -160,14 +185,16 @@ def _committed_offsets(
     admin: AdminClient, group_id: str, timeout: float
 ) -> dict[tuple[str, int], int]:
     request = ConsumerGroupTopicPartitions(group_id)
-    futures = _guard(lambda: admin.list_consumer_group_offsets([request], request_timeout=timeout))
-    result = _wait(futures[group_id], timeout)
-    committed: dict[tuple[str, int], int] = {}
-    for tp in result.topic_partitions or []:
-        if tp.error is not None:
-            raise _as_app_error(tp.error)
-        committed[(tp.topic, tp.partition)] = tp.offset
-    return committed
+
+    def fetch() -> dict[tuple[str, int], int]:
+        future = admin.list_consumer_group_offsets([request], request_timeout=timeout)[group_id]
+        committed: dict[tuple[str, int], int] = {}
+        for tp in future.result(timeout=timeout).topic_partitions or []:
+            _raise_partition_error(tp)
+            committed[(tp.topic, tp.partition)] = tp.offset
+        return committed
+
+    return _run_group_request(fetch, timeout)
 
 
 def _list_offsets(
@@ -177,11 +204,13 @@ def _list_offsets(
     if not specs:
         return {}
     request = {TopicPartition(t, p): spec for (t, p), spec in specs.items()}
-    futures = _guard(lambda: admin.list_offsets(request, request_timeout=timeout))
+    futures = call_with_timeout(lambda: admin.list_offsets(request, request_timeout=timeout))
     out: dict[tuple[str, int], int | AppError] = {}
     for tp, future in futures.items():
         try:
-            out[(tp.topic, tp.partition)] = _wait(future, timeout).offset
+            out[(tp.topic, tp.partition)] = call_with_timeout(
+                lambda future=future: future.result(timeout=timeout).offset
+            )
         except AppError as exc:
             out[(tp.topic, tp.partition)] = exc
     return out
@@ -233,7 +262,7 @@ def describe_group(
 
 
 def _topic_partitions(admin: AdminClient, topic: str, timeout: float) -> list[int]:
-    metadata = _guard(lambda: admin.list_topics(topic=topic, timeout=timeout))
+    metadata = call_with_timeout(lambda: admin.list_topics(topic=topic, timeout=timeout))
     found = metadata.topics.get(topic)
     if found is not None and found.error is not None:
         raise map_kafka_exception(found.error)
@@ -295,14 +324,13 @@ def _alter(
     admin: AdminClient, group_id: str, targets: list[TopicPartition], timeout: float
 ) -> None:
     request = ConsumerGroupTopicPartitions(group_id, targets)
-    try:
-        futures = admin.alter_consumer_group_offsets([request], request_timeout=timeout)
-    except Exception as exc:
-        raise _as_app_error(exc, write=True) from None
-    result = _wait(futures[group_id], timeout, write=True)
-    for tp in result.topic_partitions or []:
-        if tp.error is not None:
-            raise _as_app_error(tp.error, write=True)
+
+    def commit() -> None:
+        future = admin.alter_consumer_group_offsets([request], request_timeout=timeout)[group_id]
+        for tp in future.result(timeout=timeout).topic_partitions or []:
+            _raise_partition_error(tp)
+
+    _run_group_request(commit, timeout, write=True)
 
 
 def reset_offsets(
@@ -346,8 +374,10 @@ def create_group(
 
 def delete_group(admin: AdminClient, group_id: str, timeout: float = DEFAULT_TIMEOUT_S) -> None:
     _require_empty(_describe(admin, group_id, timeout), group_id)
-    try:
-        futures = admin.delete_consumer_groups([group_id], request_timeout=timeout)
-    except Exception as exc:
-        raise _as_app_error(exc, write=True) from None
-    _wait(futures[group_id], timeout, write=True)
+    _run_group_request(
+        lambda: admin.delete_consumer_groups([group_id], request_timeout=timeout)[group_id].result(
+            timeout=timeout
+        ),
+        timeout,
+        write=True,
+    )

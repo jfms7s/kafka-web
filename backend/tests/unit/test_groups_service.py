@@ -1,7 +1,14 @@
 import pytest
 from confluent_kafka import KafkaError
 
-from kafka_web.errors import BrokerError, Conflict, KafkaTimeout, NotFound, ValidationFailed
+from kafka_web.errors import (
+    BrokerError,
+    Conflict,
+    Forbidden,
+    KafkaTimeout,
+    NotFound,
+    ValidationFailed,
+)
 from kafka_web.services.groups import (
     GroupDetailView,
     GroupSummary,
@@ -466,3 +473,58 @@ def test_every_admin_call_carries_the_request_timeout() -> None:
 
     assert admin.kwargs_seen
     assert all(kw == {"request_timeout": 10.0} for kw in admin.kwargs_seen)
+
+
+# --- coordinator flux --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fast_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("kafka_web.services.groups.RETRY_DELAY_S", 0.0)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        KafkaError.NOT_COORDINATOR,
+        KafkaError.COORDINATOR_NOT_AVAILABLE,
+        KafkaError.COORDINATOR_LOAD_IN_PROGRESS,
+    ],
+)
+def test_describe_retries_while_the_group_coordinator_is_moving(
+    code: int, fast_retries: None
+) -> None:
+    admin = empty_group_admin()
+    admin.describe_failures = [kafka_exc(code), kafka_exc(code)]
+
+    assert describe_group(admin, "g").state == "empty"
+    assert admin.describe_calls == 3
+
+
+def test_committed_offsets_and_alter_retry_too(fast_retries: None) -> None:
+    admin = empty_group_admin()
+    admin.list_offset_failures = [kafka_exc(KafkaError.NOT_COORDINATOR)]
+    admin.alter_failures = [kafka_exc(KafkaError.COORDINATOR_NOT_AVAILABLE)]
+
+    assert describe_group(admin, "g").offsets[0].committed == 2
+    reset_offsets(admin, "g", "orders", "latest", None)
+
+    assert len(admin.alter_calls) == 2  # the failed attempt and the one that landed
+
+
+def test_a_coordinator_that_never_settles_gives_up_within_the_timeout() -> None:
+    admin = empty_group_admin()
+    admin.describe_failures = [kafka_exc(KafkaError.NOT_COORDINATOR)] * 1000
+
+    with pytest.raises(BrokerError):
+        describe_group(admin, "g", timeout=0.3)
+    assert 1 < admin.describe_calls < 1000
+
+
+def test_other_failures_are_not_retried(fast_retries: None) -> None:
+    admin = empty_group_admin()
+    admin.describe_failures = [kafka_exc(KafkaError.GROUP_AUTHORIZATION_FAILED)]
+
+    with pytest.raises(Forbidden):
+        describe_group(admin, "g")
+    assert admin.describe_calls == 1

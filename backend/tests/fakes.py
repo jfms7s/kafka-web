@@ -544,6 +544,11 @@ class FakeGroupAdmin:
         self.alter_error: BaseException | None = None  # whole-call failure
         self.alter_partition_error: Any = None  # a KafkaError set on every altered partition
         self.delete_error: BaseException | None = None
+        # Failures handed out one per call before the canned behaviour takes over.
+        self.describe_failures: list[BaseException] = []
+        self.list_offset_failures: list[BaseException] = []
+        self.alter_failures: list[BaseException] = []
+        self.describe_calls = 0
         self.list_offsets_errors: dict[tuple[str, int], BaseException] = {}
         self.alter_calls: list[tuple[str, list[tuple[str, int, int]]]] = []
         self.delete_calls: list[list[str]] = []
@@ -572,6 +577,9 @@ class FakeGroupAdmin:
 
     def describe_consumer_groups(self, group_ids: list[str], **kwargs: Any):
         self.kwargs_seen.append(kwargs)
+        self.describe_calls += 1
+        if self.describe_failures:
+            return {g: _done(error=self.describe_failures.pop(0)) for g in group_ids}
         out = {}
         for group in group_ids:
             found = self.descriptions.get(group)
@@ -585,6 +593,9 @@ class FakeGroupAdmin:
         from confluent_kafka import ConsumerGroupTopicPartitions, TopicPartition
 
         self.kwargs_seen.append(kwargs)
+        if self.list_offset_failures:
+            failure = self.list_offset_failures.pop(0)
+            return {r.group_id: _done(error=failure) for r in requests}
         out = {}
         for request in requests:
             committed = self.committed.get(request.group_id, {})
@@ -602,6 +613,9 @@ class FakeGroupAdmin:
                     [(tp.topic, tp.partition, tp.offset) for tp in request.topic_partitions],
                 )
             )
+            if self.alter_failures:
+                out[request.group_id] = _done(error=self.alter_failures.pop(0))
+                continue
             if self.alter_error is not None:
                 out[request.group_id] = _done(error=self.alter_error)
                 continue
