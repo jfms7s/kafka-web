@@ -7,6 +7,7 @@ import { ToastProvider } from '../components/Toasts'
 import { ClusterForm } from './ClusterForm'
 
 type Handler = (request: Request) => Response | Promise<Response>
+type User = ReturnType<typeof userEvent.setup>
 let fetchMock: ReturnType<typeof vi.fn<(request: Request) => Promise<Response>>>
 
 function mockFetch(handler: Handler = () => Response.json({})) {
@@ -387,6 +388,43 @@ describe('ClusterForm test connection', () => {
     expect(new URL(calls[0].url).search).toBe('')
     expect(await bodyOf(calls[0])).toMatchObject({ name: 'dev', bootstrap_servers: 'localhost:9092' })
     expect(callsTo('POST', '/api/clusters')).toHaveLength(0)
+  })
+
+  it.each([
+    ['bootstrap servers', (user: User) => user.type(screen.getByLabelText('Bootstrap servers'), '2')],
+    ['environment', (user: User) => user.type(screen.getByLabelText('Environment'), 'x')],
+    ['read-only', (user: User) => user.click(screen.getByLabelText('Read-only'))],
+    [
+      'security protocol',
+      (user: User) => user.selectOptions(screen.getByLabelText('Security protocol'), 'SSL'),
+    ],
+  ])('clears a stale "Connection OK" once the %s is changed', async (_field, change) => {
+    mockFetch(() => Response.json({ ok: true }))
+    const user = renderForm()
+    await fillBasics(user)
+    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    expect(await screen.findByText('Connection OK')).toBeInTheDocument()
+
+    await change(user)
+
+    expect(screen.queryByText('Connection OK')).not.toBeInTheDocument()
+  })
+
+  it('clears a stale "Connection OK" once a truststore file is chosen', async () => {
+    mockFetch(() => Response.json({ ok: true }))
+    const user = renderForm()
+    await fillBasics(user)
+    await user.selectOptions(screen.getByLabelText('Security protocol'), 'SSL')
+    await user.type(screen.getByLabelText('Truststore (base64)'), 'cGVt')
+    await user.click(screen.getByRole('button', { name: 'Test connection' }))
+    expect(await screen.findByText('Connection OK')).toBeInTheDocument()
+
+    await user.upload(
+      screen.getByLabelText('Truststore file'),
+      new File(['x'], 'ca.pem', { type: 'text/plain' }),
+    )
+
+    expect(screen.queryByText('Connection OK')).not.toBeInTheDocument()
   })
 
   it('shows the failure message inline', async () => {

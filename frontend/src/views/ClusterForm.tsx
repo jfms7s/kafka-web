@@ -134,8 +134,11 @@ function FormBody({ saved }: { saved?: ClusterView }) {
   const [errors, setErrors] = useState<FieldErrors>({})
   const [testResult, setTestResult] = useState<TestResult | null>(null)
 
-  const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
+  // Any edit invalidates a previous test: its verdict was about the values as they were then.
+  const set = <K extends keyof FormState>(key: K, value: FormState[K]) => {
+    setTestResult(null)
     setForm((current) => ({ ...current, [key]: value }))
+  }
 
   const tls = usesTls(form.protocol)
   const sasl = usesSasl(form.protocol)
@@ -143,6 +146,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
   const hasSavedTruststore = editing && (saved.truststore?.length ?? 0) > 0
 
   function changeEnv(env: string) {
+    setTestResult(null)
     setForm((current) => ({
       ...current,
       env,
@@ -151,6 +155,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
   }
 
   async function chooseFile(chosen: File | undefined) {
+    setTestResult(null)
     if (!chosen) {
       setFile(null)
       return
@@ -411,7 +416,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
           checked={form.readOnly}
           onChange={(e) => {
             setReadOnlyTouched(true)
-            set('readOnly', e.target.checked)
+            set('readOnly', e.target.checked) // also clears a stale test result
           }}
         />
         Read-only
