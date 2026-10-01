@@ -124,3 +124,22 @@ def test_incomplete_start_modes_are_422_with_field(
     assert response.status_code == 422
     assert response.json()["code"] == "validation_failed"
     assert response.json()["field"] == field
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b'{"a": "\\ud800"}', b"[" * 255 + b"]" * 255, b"[" * 5000 + b"]" * 5000],
+    ids=["lone_surrogate", "255_deep", "5000_deep"],
+)
+def test_json_the_response_cannot_carry_does_not_fail_the_snapshot(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, payload: bytes
+) -> None:
+    view = to_message_view(FakeMessage(key=payload, value=payload, headers=[("h", payload)]))
+    monkeypatch.setattr(messages_api, "consume_snapshot", lambda *args: [view])
+
+    response = client.get("/api/clusters/dev/topics/orders/messages")
+
+    assert response.status_code == 200
+    [message] = response.json()["messages"]
+    assert message["value"]["is_json"] is False
+    assert message["value"]["data"] == payload.decode()

@@ -1,8 +1,10 @@
+import json
 from typing import Any
 
+import pytest
 from confluent_kafka import TIMESTAMP_LOG_APPEND_TIME, TIMESTAMP_NOT_AVAILABLE
 
-from kafka_web.services.decode import decode_bytes, to_message_view
+from kafka_web.services.decode import MAX_JSON_DEPTH, decode_bytes, to_message_view
 from tests.fakes import FakeMessage
 
 
@@ -128,3 +130,45 @@ def test_message_view_serialises_to_plain_json() -> None:
     dumped: dict[str, Any] = to_message_view(FakeMessage(value=b"7")).model_dump(mode="json")
 
     assert dumped["value"] == {"encoding": "utf-8", "data": "7", "is_json": True, "json_value": 7}
+
+
+def _nested(depth: int) -> bytes:
+    return b"[" * depth + b"]" * depth
+
+
+# json.loads accepts all of these, but they cannot be serialised back to the browser.
+UNSERIALISABLE_JSON = {
+    "lone_surrogate": b'{"a": "\\ud800"}',
+    "255_deep": _nested(255),
+    "5000_deep": _nested(5000),
+    "deep_in_object": b'{"a":' * 300 + b"1" + b"}" * 300,
+}
+
+
+@pytest.mark.parametrize("raw", UNSERIALISABLE_JSON.values(), ids=UNSERIALISABLE_JSON.keys())
+def test_json_that_cannot_be_serialised_is_kept_as_text(raw: bytes) -> None:
+    d = decode_bytes(raw)
+
+    assert (d.encoding, d.is_json, d.json_value) == ("utf-8", False, None)
+    assert d.data == raw.decode()
+
+
+@pytest.mark.parametrize("raw", UNSERIALISABLE_JSON.values(), ids=UNSERIALISABLE_JSON.keys())
+def test_whole_message_view_serialises_for_any_json_payload(raw: bytes) -> None:
+    view = to_message_view(FakeMessage(key=raw, value=raw, headers=[("h", raw)]))
+
+    body = json.loads(view.model_dump_json())
+
+    assert body["value"]["is_json"] is False
+    assert body["headers"][0]["value"]["data"] == raw.decode()
+
+
+def test_deeply_nested_json_within_the_limit_is_still_json() -> None:
+    d = decode_bytes(_nested(MAX_JSON_DEPTH))
+
+    assert d.is_json is True
+    json.loads(to_message_view(FakeMessage(value=_nested(MAX_JSON_DEPTH))).model_dump_json())
+
+
+def test_json_one_level_past_the_limit_is_text() -> None:
+    assert decode_bytes(_nested(MAX_JSON_DEPTH + 1)).is_json is False

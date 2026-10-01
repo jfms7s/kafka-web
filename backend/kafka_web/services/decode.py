@@ -6,9 +6,13 @@ from typing import Any, Literal, Protocol
 
 from confluent_kafka import TIMESTAMP_CREATE_TIME, TIMESTAMP_LOG_APPEND_TIME
 from pydantic import BaseModel
+from pydantic_core import to_json
 
 Encoding = Literal["utf-8", "base64", "null"]
 TimestampType = Literal["create", "log_append", "none"]
+
+# Well below pydantic's 255-level serialisation limit, which the response envelope also eats into.
+MAX_JSON_DEPTH = 100
 
 _TIMESTAMP_TYPES: dict[int, TimestampType] = {
     TIMESTAMP_CREATE_TIME: "create",
@@ -60,12 +64,48 @@ def _finite_float(text: str) -> float:
     return number
 
 
-def _parse_json(text: str) -> tuple[bool, Any]:
-    """`(True, value)` if `text` is strict JSON a browser can round-trip, else `(False, None)`."""
+def _nesting_depth(value: Any) -> int:
+    """Levels of arrays/objects in a parsed JSON value (a scalar is 0, `[]` is 1)."""
+    deepest = 0
+    pending = [(value, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if isinstance(node, dict):
+            children = list(node.values())
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        deepest = max(deepest, depth)
+        if deepest > MAX_JSON_DEPTH:
+            break
+        pending.extend((child, depth + 1) for child in children)
+    return deepest
+
+
+def _can_serialise(value: Any) -> bool:
+    """Whether the response can carry `value`: pydantic must be able to write it out."""
+    if _nesting_depth(value) > MAX_JSON_DEPTH:
+        return False
     try:
-        return True, json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+        to_json(value)
+    except ValueError:  # PydanticSerializationError, e.g. a lone surrogate escape (\ud800)
+        return False
+    return True
+
+
+def _parse_json(text: str) -> tuple[bool, Any]:
+    """`(True, value)` if `text` is strict JSON a browser can round-trip, else `(False, None)`.
+
+    `json.loads` accepts more than the response can carry: lone surrogate escapes and nesting
+    beyond pydantic's serialisation depth limit (255 levels, shared with the response envelope).
+    Such text is not treated as JSON; it is still returned verbatim as `data`.
+    """
+    try:
+        value = json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
     except (ValueError, RecursionError):  # JSONDecodeError is a ValueError
         return False, None
+    return (True, value) if _can_serialise(value) else (False, None)
 
 
 def decode_bytes(raw: bytes | str | None) -> Decoded:
