@@ -209,5 +209,5 @@ def store(tmp_path: Path, memory_keyring: MemoryKeyring) -> ClusterStore:
 @pytest.fixture
 def api(store: ClusterStore) -> Iterator[TestClient]:
     """The real app (real registry, real Kafka clients) over a temp config dir + memory keyring."""
-    with TestClient(create_app(store=store)) as client:
+    with TestClient(create_app(store=store), base_url="http://127.0.0.1:8000") as client:
         yield client

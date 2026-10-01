@@ -18,6 +18,7 @@ from tests.fakes import Fakes
 
 SASL_SECRET = "sasl-s3cret-value"
 TRUSTSTORE_PASSWORD = "truststore-pw-value"
+LOCAL = "http://127.0.0.1:8000"
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def registry(store: ClusterStore, fakes: Fakes) -> ConnectionRegistry:
 
 @pytest.fixture
 def client(store: ClusterStore, registry: ConnectionRegistry):
-    with TestClient(create_app(store=store, registry=registry)) as client:
+    with TestClient(create_app(store=store, registry=registry), base_url=LOCAL) as client:
         yield client
 
 
@@ -416,14 +417,14 @@ def test_unexpected_exception_is_500_with_error_body(store: ClusterStore):
             raise RuntimeError("secret internals")
 
     app = create_app(store=store, registry=Exploding(store))
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with TestClient(app, base_url=LOCAL, raise_server_exceptions=False) as client:
         response = client.get("/api/status")
     body = assert_error(response, 500, "internal_error")
     assert "secret internals" not in body["message"]
 
 
 def test_shutdown_closes_all_connections(store: ClusterStore, registry: ConnectionRegistry):
-    with TestClient(create_app(store=store, registry=registry)) as client:
+    with TestClient(create_app(store=store, registry=registry), base_url=LOCAL) as client:
         client.post("/api/clusters", json=plaintext_body())
         client.post("/api/clusters/dev/connect")
         assert registry.is_connected("dev")
@@ -435,7 +436,7 @@ def test_static_dir_is_served_without_shadowing_api(tmp_path: Path, store, regis
     static.mkdir()
     (static / "index.html").write_text("<h1>kafka-web</h1>")
     app = create_app(store=store, registry=registry, static_dir=static)
-    with TestClient(app) as client:
+    with TestClient(app, base_url=LOCAL) as client:
         assert "kafka-web" in client.get("/").text
         assert client.get("/api/clusters").json() == []
 
@@ -449,6 +450,36 @@ def test_default_app_uses_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("KAFKA_WEB_CONFIG_DIR", str(root))
     app = create_app()
     assert isinstance(app, FastAPI)
-    with TestClient(app) as client:
+    with TestClient(app, base_url=LOCAL) as client:
         [cluster] = client.get("/api/clusters").json()
     assert cluster["name"] == "local"
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ({"name": "other"}, "name_immutable"),
+        (
+            {
+                "security_protocol": "SASL_PLAINTEXT",
+                "sasl_mechanism": "PLAIN",
+                "sasl_username": "u",
+            },
+            "sasl_password_required",
+        ),
+    ],
+)
+def test_invalid_update_keeps_connection_and_streams(
+    client: TestClient, registry: ConnectionRegistry, change: dict[str, Any], code: str
+):
+    client.post("/api/clusters", json=plaintext_body())
+    conn = registry.get("dev")
+    stop = threading.Event()
+    conn.streams.add(stop)
+
+    response = client.put("/api/clusters/dev", json={**plaintext_body(), **change})
+
+    assert_error(response, 422, code)
+    assert registry.get("dev") is conn
+    assert not stop.is_set()
+    assert not conn.closed

@@ -11,8 +11,10 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from kafka_web.api import clusters
+from kafka_web.api.security import LOCAL_HOSTS, LocalOriginMiddleware
 from kafka_web.config.paths import config_dir
 from kafka_web.config.secrets import SecretStore
 from kafka_web.config.store import ClusterStore
@@ -83,6 +85,10 @@ def create_app(
     app = FastAPI(title="kafka-web", lifespan=lifespan)
     app.state.store = store
     app.state.registry = registry
+
+    # Outermost first: a foreign Host is refused before the Origin check or any route runs.
+    app.add_middleware(LocalOriginMiddleware)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(LOCAL_HOSTS))
 
     app.add_exception_handler(AppError, _app_error)
     app.add_exception_handler(RequestValidationError, _request_validation_error)

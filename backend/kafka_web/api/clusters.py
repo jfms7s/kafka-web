@@ -72,6 +72,7 @@ def get_cluster(name: str, store: StoreDep, registry: RegistryDep) -> ClusterVie
 def update_cluster(
     name: str, inp: ClusterInput, store: StoreDep, registry: RegistryDep
 ) -> ClusterView:
+    store.materialize(inp, existing=store.get(name))  # reject invalid edits before disturbing
     registry.disconnect(name)  # closes the connection and stops its live streams
     cfg = store.update(name, inp)
     registry.disconnect(name)  # a connect racing the update may have cached the old settings

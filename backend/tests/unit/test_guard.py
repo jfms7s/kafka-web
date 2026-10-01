@@ -31,7 +31,7 @@ def client(store: ClusterStore):
     def write_probe(cfg: Annotated[ClusterConfig, Depends(writable_cluster)]) -> dict[str, str]:
         return {"cluster": cfg.name}
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         yield client
 
 
