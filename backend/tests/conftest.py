@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 
 import jks
+import keyring.backend
+import keyring.errors
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -89,3 +91,28 @@ def make_pkcs12_truststore(certs: list[x509.Certificate], password: str | None) 
     return pkcs12.serialize_key_and_certificates(
         name=None, key=None, cert=None, cas=certs, encryption_algorithm=encryption
     )
+
+
+class MemoryKeyring(keyring.backend.KeyringBackend):
+    """In-memory keyring so unit tests never touch the real OS keyring."""
+
+    priority = 1
+
+    def __init__(self):
+        self.data: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service, username):
+        return self.data.get((service, username))
+
+    def set_password(self, service, username, password):
+        self.data[(service, username)] = password
+
+    def delete_password(self, service, username):
+        if (service, username) not in self.data:
+            raise keyring.errors.PasswordDeleteError()
+        del self.data[(service, username)]
+
+
+@pytest.fixture
+def memory_keyring() -> MemoryKeyring:
+    return MemoryKeyring()
