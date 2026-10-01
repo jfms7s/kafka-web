@@ -4,6 +4,7 @@ import base64
 import datetime as dt
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -145,6 +146,22 @@ def test_connect_unreachable_broker_times_out(api: TestClient):
     assert response.status_code in (502, 504), response.text
     assert elapsed < MAX_FAILURE_S
     assert api.get("/api/status").json() == {"connections": []}
+
+
+def test_parallel_connects_to_unreachable_broker_share_one_attempt(api: TestClient):
+    """Several page requests at once must not queue up one 10 s attempt each."""
+    api.post("/api/clusters", json=plaintext_body("127.0.0.1:1", name="dead"))
+
+    def connect(_: int) -> int:
+        return api.post("/api/clusters/dead/connect").status_code
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        statuses = list(pool.map(connect, range(5)))
+    elapsed = time.monotonic() - started
+
+    assert all(status in (502, 504) for status in statuses), statuses
+    assert elapsed < MAX_FAILURE_S
 
 
 def test_test_connection_does_not_persist(

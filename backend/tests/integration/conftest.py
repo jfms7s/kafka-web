@@ -48,10 +48,16 @@ BASE_ENV = {
 }
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def _free_ports(count: int) -> list[int]:
+    """`count` distinct free ports: all sockets stay bound until every port has been picked, so
+    the OS cannot hand out the same port twice (picking them one by one could)."""
+    with contextlib.ExitStack() as stack:
+        ports = []
+        for _ in range(count):
+            sock = stack.enter_context(socket.socket())
+            sock.bind(("127.0.0.1", 0))
+            ports.append(sock.getsockname()[1])
+    return ports
 
 
 def _wait_ready(container: DockerContainer, conf: dict[str, Any]) -> None:
@@ -89,7 +95,7 @@ def _start(env: dict[str, str], ports: list[int], files: dict[str, bytes]) -> Do
 @pytest.fixture(scope="session")
 def kafka_plaintext() -> Iterator[str]:
     """Bootstrap servers (`localhost:<port>`) of a PLAINTEXT broker."""
-    port = _free_port()
+    [port] = _free_ports(1)
     container = _start(
         {
             "KAFKA_LISTENERS": f"PLAINTEXT://:{port},CONTROLLER://:9093",
@@ -135,7 +141,7 @@ def kafka_sasl_ssl(
       instead of bind-mounted: no SELinux relabelling (`:Z`) and no rootless-podman UID
       mapping questions about who may read the file.
     """
-    plain_port, sasl_port = _free_port(), _free_port()
+    plain_port, sasl_port = _free_ports(2)
     jaas = (
         "org.apache.kafka.common.security.plain.PlainLoginModule required "
         'username="admin" password="admin-secret" '
