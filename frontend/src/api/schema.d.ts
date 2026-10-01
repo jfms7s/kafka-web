@@ -238,6 +238,13 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AssignmentItem */
+        AssignmentItem: {
+            /** Topic */
+            topic: string;
+            /** Partition */
+            partition: number;
+        };
         /** BatchResultView */
         BatchResultView: {
             /** Succeeded */
@@ -452,10 +459,7 @@ export interface components {
             /** Host */
             host: string;
             /** Assignments */
-            assignments: [
-                string,
-                number
-            ][];
+            assignments: components["schemas"]["AssignmentItem"][];
         };
         /** MessageListView */
         MessageListView: {

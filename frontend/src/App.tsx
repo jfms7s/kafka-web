@@ -2,10 +2,10 @@ import { Link, Route, Routes } from 'react-router'
 import { Layout } from './components/Layout'
 import { ClusterForm } from './views/ClusterForm'
 import { ClusterManager } from './views/ClusterManager'
+import { ConsumerGroups } from './views/ConsumerGroups'
+import { GroupDetail } from './views/GroupDetail'
 import { TopicBrowser } from './views/TopicBrowser'
 import { TopicDetail } from './views/TopicDetail'
-
-const Placeholder = ({ text }: { text: string }) => <p className="text-slate-600">{text}</p>
 
 export default function App() {
   return (
@@ -16,7 +16,8 @@ export default function App() {
         <Route path="/clusters/:name/edit" element={<ClusterForm />} />
         <Route path="/c/:cluster/topics" element={<TopicBrowser />} />
         <Route path="/c/:cluster/topics/:topic" element={<TopicDetail />} />
-        <Route path="/c/:cluster/groups" element={<Placeholder text="Consumer Groups — coming in a later task" />} />
+        <Route path="/c/:cluster/groups" element={<ConsumerGroups />} />
+        <Route path="/c/:cluster/groups/:group" element={<GroupDetail />} />
         <Route
           path="*"
           element={
