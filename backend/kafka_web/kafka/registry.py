@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import threading
@@ -20,6 +21,8 @@ from kafka_web.errors import AppError, Conflict
 from kafka_web.kafka.client_config import build_client_config
 from kafka_web.kafka.errors import call_with_timeout, explain_connect_failure
 
+logger = logging.getLogger(__name__)
+
 ADMIN_TIMEOUT_S = 10.0
 PRODUCER_FLUSH_TIMEOUT_S = 5
 # Defaults under the user's `extra`: a TCP/TLS connect never waits longer than the admin calls.
@@ -34,17 +37,51 @@ def check_connectivity(admin: AdminClient, timeout: float = ADMIN_TIMEOUT_S) -> 
 @dataclass(eq=False)
 class ClusterConnection:
     name: str
-    client_config: dict[str, str]
-    admin: AdminClient
-    producer: Producer
+    client_config: dict[str, str] = field(repr=False)  # carries sasl.password
+    admin: AdminClient = field(repr=False)
+    producer: Producer = field(repr=False)
     connected_at: datetime  # UTC
     streams: set[threading.Event] = field(default_factory=set)  # stop events of live streams
+    closed: bool = False
 
     def close(self) -> None:
+        self.closed = True
         for stop in list(self.streams):
             stop.set()
         self.streams.clear()
         self.producer.flush(PRODUCER_FLUSH_TIMEOUT_S)
+
+
+class _Attempt:
+    """One in-flight connect; every request that queued behind it shares its outcome."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.conn: ClusterConnection | None = None
+        self.error: BaseException | None = None
+
+    def outcome(self) -> ClusterConnection:
+        """For a waiter: the shared connection, or a clone of the leader's error (one exception
+        object raised in several threads would have its traceback rewritten concurrently)."""
+        if self.error is not None:
+            raise _clone(self.error) from None
+        assert self.conn is not None
+        return self.conn
+
+
+def _clone(exc: BaseException) -> BaseException:
+    # Not copy.copy: that re-runs __init__ with `args`, which fails for keyword-only parameters.
+    clone = type(exc).__new__(type(exc), *exc.args)
+    clone.__dict__.update(exc.__dict__)
+    return clone
+
+
+class _Slot:
+    """Per-cluster coordination: `lock` is held only briefly, never during network I/O."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.attempt: _Attempt | None = None
 
 
 class _ReportedErrors:
@@ -96,37 +133,77 @@ class ConnectionRegistry:
         self._check = check
         self._lock = threading.Lock()  # guards the two dicts below, never held while connecting
         self._connections: dict[str, ClusterConnection] = {}
-        self._cluster_locks: dict[str, threading.Lock] = {}  # serialize connect/disconnect per name
+        self._slots: dict[str, _Slot] = {}
 
     # --- connections --------------------------------------------------------------------------
 
     def get(self, name: str) -> ClusterConnection:
+        """The cached connection, or a new one. Connects are single-flight per cluster: requests
+        arriving while a connect is in flight share its result or error instead of queueing up
+        their own 10 s attempts; a request arriving after a failure starts a fresh attempt."""
         conn = self._cached(name)
-        if conn is None:
-            self._store.get(name)  # NotFound before a lock is allocated for an arbitrary name
-            with self._cluster_lock(name):
-                conn = self._cached(name)
-                if conn is None:
-                    conn = self._open(name)
-                    with self._lock:
-                        self._connections[name] = conn
-                    return conn
-        conn.admin.poll(0)  # drain queued error events so they cannot pile up on idle connections
-        return conn
+        if conn is not None:
+            conn.admin.poll(0)  # drain queued error events so they cannot pile up when idle
+            return conn
+        self._store.get(name)  # NotFound before a slot is allocated for an arbitrary name
+        slot = self._slot(name, create=True)
+        assert slot is not None
+        with slot.lock:
+            conn = self._cached(name)
+            if conn is not None:
+                return conn
+            attempt = slot.attempt
+            leading = attempt is None
+            if attempt is None:
+                attempt = slot.attempt = _Attempt()
+        if leading:
+            self._run(name, slot, attempt)
+            if attempt.error is not None:
+                raise attempt.error  # the leader keeps the original, with its traceback
+        else:
+            attempt.done.wait()
+        return attempt.outcome()
 
     def connect(self, name: str) -> ClusterConnection:
         return self.get(name)
 
     def disconnect(self, name: str) -> None:
-        """Close the connection and stop its streams; waits for an in-flight connect first."""
-        with self._lock:
-            lock = self._cluster_locks.get(name)
-        if lock is None:
+        """Close the connection and stop its streams; waits for an in-flight connect first, so
+        a connect that started before this call cannot cache a connection after it."""
+        slot = self._slot(name, create=False)
+        if slot is None:
             return
-        with lock, self._lock:
+        with slot.lock:
+            attempt = slot.attempt
+        if attempt is not None:
+            attempt.done.wait()
+        with slot.lock, self._lock:
             conn = self._connections.pop(name, None)
         if conn is not None:
             conn.close()
+
+    def register_stream(self, name: str, stop: threading.Event) -> None:
+        """Attach a live stream's stop event to the cluster's open connection. With no open
+        connection (never connected, or closed by an edit/delete) the event is set at once."""
+        slot = self._slot(name, create=False)
+        if slot is None:
+            stop.set()
+            return
+        with slot.lock:
+            conn = self._cached(name)
+            if conn is None or conn.closed:
+                stop.set()
+            else:
+                conn.streams.add(stop)
+
+    def unregister_stream(self, name: str, stop: threading.Event) -> None:
+        slot = self._slot(name, create=False)
+        if slot is None:
+            return
+        with slot.lock:
+            conn = self._cached(name)
+            if conn is not None:
+                conn.streams.discard(stop)
 
     def is_connected(self, name: str) -> bool:
         with self._lock:
@@ -137,10 +214,14 @@ class ConnectionRegistry:
             return list(self._connections.values())
 
     def close_all(self) -> None:
+        """Close every connection; one failing close does not keep the others open."""
         with self._lock:
             names = list(self._connections)
         for name in names:
-            self.disconnect(name)
+            try:
+                self.disconnect(name)
+            except Exception as exc:  # the message may carry client config: log the type only
+                logger.warning("Closing connection %r failed: %s", name, type(exc).__name__)
 
     # --- configuration ------------------------------------------------------------------------
 
@@ -186,9 +267,26 @@ class ConnectionRegistry:
         with self._lock:
             return self._connections.get(name)
 
-    def _cluster_lock(self, name: str) -> threading.Lock:
+    def _slot(self, name: str, *, create: bool) -> _Slot | None:
         with self._lock:
-            return self._cluster_locks.setdefault(name, threading.Lock())
+            if create:
+                return self._slots.setdefault(name, _Slot())
+            return self._slots.get(name)
+
+    def _run(self, name: str, slot: _Slot, attempt: _Attempt) -> None:
+        """Perform `attempt` (this thread leads it) and publish the outcome to its waiters."""
+        try:
+            conn = self._open(name)
+        except BaseException as exc:
+            attempt.error = exc
+        else:
+            attempt.conn = conn
+        with slot.lock:
+            if attempt.conn is not None:
+                with self._lock:
+                    self._connections[name] = attempt.conn
+            slot.attempt = None
+        attempt.done.set()
 
     def _open(self, name: str) -> ClusterConnection:
         conf = self.client_config(name)

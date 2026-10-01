@@ -461,3 +461,242 @@ def test_test_plaintext(registry: ConnectionRegistry, fakes: Fakes):
     [admin] = fakes.admins
     assert admin.conf["security.protocol"] == "PLAINTEXT"
     assert admin.list_topics_timeouts == [10.0]
+
+
+# --- fix round 1 -------------------------------------------------------------------------------
+
+
+def run_threads(n: int, target) -> list[Any]:
+    """Start `n` threads at once on `target()`; return each result or exception (in order)."""
+    barrier = threading.Barrier(n)
+    results: list[Any] = [None] * n
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        try:
+            results[i] = target()
+        except BaseException as exc:
+            results[i] = exc
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    return results
+
+
+def test_concurrent_gets_on_a_dead_cluster_share_one_attempt(
+    store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes
+):
+    store.create(plaintext())
+    duration = 0.3
+
+    def slow_failure(admin):
+        time.sleep(duration)
+        raise KafkaException(KafkaError(KafkaError._TIMED_OUT, "Failed to get metadata"))
+
+    fakes.on_list_topics = slow_failure
+    started = time.monotonic()
+    results = run_threads(5, lambda: registry.get("dev"))
+    elapsed = time.monotonic() - started
+
+    assert all(isinstance(r, KafkaTimeout) for r in results), results
+    assert elapsed < 2 * duration  # one shared attempt, not five serialized ones
+    assert len(fakes.admins) == 1
+    assert len({id(r) for r in results}) == 5  # each waiter raises its own exception object
+    assert all(r.code == "kafka_timeout" and "metadata" in r.message for r in results)
+
+    # a request arriving after the failure completes retries
+    with pytest.raises(KafkaTimeout):
+        registry.get("dev")
+    assert len(fakes.admins) == 2
+
+
+def test_waiters_receive_the_connection_of_the_shared_attempt(
+    store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes
+):
+    store.create(plaintext())
+
+    def slow(admin):
+        time.sleep(0.2)
+        return object()
+
+    fakes.on_list_topics = slow
+    results = run_threads(5, lambda: registry.get("dev"))
+    assert all(isinstance(r, ClusterConnection) for r in results), results
+    assert all(r is results[0] for r in results)
+    assert len(fakes.admins) == 1
+
+
+def test_disconnect_waits_for_an_in_flight_connect_and_closes_it(
+    store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes
+):
+    store.create(plaintext())
+    entered, release = threading.Event(), threading.Event()
+
+    def gated(admin):
+        entered.set()
+        release.wait(timeout=5)
+        return object()
+
+    fakes.on_list_topics = gated
+    results: list[Any] = []
+    connector = threading.Thread(target=lambda: results.append(registry.get("dev")))
+    connector.start()
+    assert entered.wait(timeout=5)
+
+    disconnector = threading.Thread(target=registry.disconnect, args=("dev",))
+    disconnector.start()
+    time.sleep(0.05)
+    assert disconnector.is_alive()  # waiting for the in-flight connect
+    release.set()
+    connector.join(timeout=5)
+    disconnector.join(timeout=5)
+
+    assert not disconnector.is_alive()
+    assert not registry.is_connected("dev")
+    [conn] = results
+    assert conn.closed
+    assert fakes.producers[0].flush_timeouts == [5]
+
+
+def test_update_racing_a_connect_leaves_no_stale_connection(
+    store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes
+):
+    """The PUT handler's sequence (disconnect, update, disconnect) against a slow connect."""
+    store.create(plaintext())
+    entered, release = threading.Event(), threading.Event()
+
+    def gated(admin):
+        if admin.conf["bootstrap.servers"] == "b1:9092":
+            entered.set()
+            release.wait(timeout=5)
+        return object()
+
+    fakes.on_list_topics = gated
+    connector = threading.Thread(target=registry.get, args=("dev",))
+    connector.start()
+    assert entered.wait(timeout=5)  # connect with the old settings is in flight
+
+    def put():
+        registry.disconnect("dev")
+        store.update("dev", plaintext(bootstrap_servers="b2:9092"))
+        registry.disconnect("dev")
+
+    updater = threading.Thread(target=put)
+    updater.start()
+    time.sleep(0.05)
+    release.set()
+    connector.join(timeout=5)
+    updater.join(timeout=5)
+
+    assert not registry.is_connected("dev")
+    assert registry.get("dev").client_config["bootstrap.servers"] == "b2:9092"
+
+
+def test_connection_repr_has_no_secrets(
+    store: ClusterStore, registry: ConnectionRegistry, certs: CertBundle
+):
+    store.create(sasl_ssl(certs))
+    conn = registry.get("stg")
+    assert SASL_SECRET not in repr(conn)
+    assert SASL_SECRET not in str(conn)
+    assert "stg" in repr(conn)
+
+
+def test_close_marks_connection_closed(store: ClusterStore, registry: ConnectionRegistry):
+    store.create(plaintext())
+    conn = registry.get("dev")
+    assert not conn.closed
+    registry.disconnect("dev")
+    assert conn.closed
+
+
+def test_register_stream_on_live_connection(store: ClusterStore, registry: ConnectionRegistry):
+    store.create(plaintext())
+    conn = registry.get("dev")
+    stop = threading.Event()
+
+    registry.register_stream("dev", stop)
+    assert stop in conn.streams
+    assert not stop.is_set()
+
+    registry.unregister_stream("dev", stop)
+    assert stop not in conn.streams
+    registry.unregister_stream("dev", stop)  # idempotent
+
+
+def test_register_stream_without_connection_stops_immediately(
+    store: ClusterStore, registry: ConnectionRegistry
+):
+    store.create(plaintext())
+    stop = threading.Event()
+    registry.register_stream("dev", stop)  # never connected
+    assert stop.is_set()
+
+    registry.get("dev")
+    registry.disconnect("dev")
+    late = threading.Event()
+    registry.register_stream("dev", late)  # connection closed by DELETE/PUT
+    assert late.is_set()
+    registry.unregister_stream("dev", late)
+    registry.unregister_stream("nope", late)
+
+
+def test_register_stream_on_closed_connection_stops_immediately(
+    store: ClusterStore, registry: ConnectionRegistry
+):
+    store.create(plaintext())
+    conn = registry.get("dev")
+    conn.close()  # closed but (artificially) still cached
+    stop = threading.Event()
+    registry.register_stream("dev", stop)
+    assert stop.is_set()
+    assert stop not in conn.streams
+
+
+def test_disconnect_stops_registered_streams(store: ClusterStore, registry: ConnectionRegistry):
+    store.create(plaintext())
+    registry.get("dev")
+    stop = threading.Event()
+    registry.register_stream("dev", stop)
+    registry.disconnect("dev")
+    assert stop.is_set()
+
+
+def test_close_all_closes_every_connection_despite_failures(
+    store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes, caplog
+):
+    for name in ("a", "b", "c"):
+        store.create(plaintext(name))
+        registry.get(name)
+
+    def broken_flush(timeout=None):
+        raise RuntimeError("flush failed: sasl.password=hunter2")
+
+    fakes.producers[0].flush = broken_flush  # type: ignore[method-assign]
+    registry.close_all()
+
+    assert registry.active() == []
+    assert [p.flush_timeouts for p in fakes.producers[1:]] == [[5], [5]]
+    assert "RuntimeError" in caplog.text
+    assert "hunter2" not in caplog.text
+
+
+def test_waiters_get_a_clone_of_errors_with_keyword_only_init(store: ClusterStore, fakes: Fakes):
+    from kafka_web.config.truststore import TruststoreError
+
+    store.create(plaintext())
+
+    def check(admin):
+        time.sleep(0.2)
+        raise TruststoreError("bad truststore", code="truststore_invalid")
+
+    registry = ConnectionRegistry(
+        store, admin_factory=fakes.admin, producer_factory=fakes.producer, check=check
+    )
+    results = run_threads(3, lambda: registry.get("dev"))
+    assert all(isinstance(r, TruststoreError) for r in results), results
+    assert {r.code for r in results} == {"truststore_invalid"}
+    assert len(fakes.admins) == 1
