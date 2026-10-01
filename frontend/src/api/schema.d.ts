@@ -112,6 +112,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/clusters/{name}/topics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Topics */
+        get: operations["list_topics_api_clusters__name__topics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/clusters/{name}/topics/{topic}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Topic Config */
+        get: operations["topic_config_api_clusters__name__topics__topic__config_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -201,6 +235,21 @@ export interface components {
             /** Connected */
             connected: boolean;
         };
+        /** ConfigEntryItem */
+        ConfigEntryItem: {
+            /** Name */
+            name: string;
+            /** Value */
+            value: string | null;
+            /** Display Value */
+            display_value: string | null;
+            /** Is Default */
+            is_default: boolean;
+            /** Source */
+            source: string;
+            /** Sensitive */
+            sensitive: boolean;
+        };
         /** ConnectionTestResult */
         ConnectionTestResult: {
             /** Ok */
@@ -231,10 +280,48 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** PartitionView */
+        PartitionView: {
+            /** Id */
+            id: number;
+            /** Leader */
+            leader: number;
+            /** Replicas */
+            replicas: number[];
+            /** Isr */
+            isr: number[];
+        };
         /** StatusView */
         StatusView: {
             /** Connections */
             connections: components["schemas"]["ConnectionView"][];
+        };
+        /** TopicConfigView */
+        TopicConfigView: {
+            /** Name */
+            name: string;
+            /** Partitions */
+            partitions: components["schemas"]["PartitionView"][];
+            /** Replication Factor */
+            replication_factor: number;
+            /** Entries */
+            entries: components["schemas"]["ConfigEntryItem"][];
+        };
+        /** TopicListView */
+        TopicListView: {
+            /** Topics */
+            topics: components["schemas"]["TopicSummaryView"][];
+        };
+        /** TopicSummaryView */
+        TopicSummaryView: {
+            /** Name */
+            name: string;
+            /** Partitions */
+            partitions: number;
+            /** Replication Factor */
+            replication_factor: number;
+            /** Internal */
+            internal: boolean;
         };
         /** ValidationError */
         ValidationError: {
@@ -517,6 +604,69 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StatusView"];
+                };
+            };
+        };
+    };
+    list_topics_api_clusters__name__topics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicListView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    topic_config_api_clusters__name__topics__topic__config_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+                topic: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TopicConfigView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
