@@ -242,13 +242,24 @@ def test_invalid_params_send_an_error_frame_then_close_1008(
     assert consumers.created == []
 
 
-def test_non_integer_params_are_refused_at_the_handshake(
-    client: TestClient, consumers: LiveConsumers
+@pytest.mark.parametrize(
+    ("query", "field"),
+    [
+        ("start=offset&offset=abc&partition=0", "offset"),
+        ("start=offset&offset=3&partition=x", "partition"),
+        ("start=timestamp&timestamp=1.5", "timestamp"),
+        ("partition=", "partition"),
+    ],
+)
+def test_non_integer_params_send_an_error_frame_then_close_1008(
+    client: TestClient, consumers: LiveConsumers, query: str, field: str
 ) -> None:
-    url = f"{URL}?start=offset&offset=abc&partition=0"
-    with pytest.raises(WebSocketDisconnect) as refused, client.websocket_connect(url):
-        pass
-    assert refused.value.code == 1008
+    with client.websocket_connect(f"{URL}?{query}") as ws:
+        frame = ws.receive_json()
+        assert close_code(ws) == 1008
+
+    assert (frame["type"], frame["code"], frame["field"]) == ("error", "validation_failed", field)
+    assert "abc" not in frame["message"]  # the input is never echoed
     assert consumers.created == []
 
 

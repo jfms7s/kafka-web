@@ -58,8 +58,10 @@ def _error_end(exc: AppError, code: int) -> _End:
 
 
 def _parse(
-    start: str, offset: int | None, timestamp: int | None, partition: int | None
+    start: str, offset: str | None, timestamp: str | None, partition: str | None
 ) -> StreamParams:
+    """Validate the raw query strings; any failure is a 422-style error frame, never a refused
+    handshake (FastAPI would reject a typed parameter before the endpoint could answer)."""
     raw = {"start": start, "offset": offset, "timestamp": timestamp, "partition": partition}
     try:
         params = StreamParams.model_validate(raw)
@@ -77,9 +79,9 @@ async def stream(
     name: str,
     topic: str,
     start: str = "latest",
-    offset: int | None = None,
-    timestamp: int | None = None,
-    partition: int | None = None,
+    offset: str | None = None,  # strings on purpose: see _parse
+    timestamp: str | None = None,
+    partition: str | None = None,
 ) -> None:
     # The HTTP Origin middleware does not see WebSockets, and browsers let any page open one:
     # refuse another origin's page before accepting (the handshake then fails with 403).
