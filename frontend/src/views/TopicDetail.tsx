@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router'
 import { topicPath } from '../api/hooks/topics'
 import { Tabs } from '../components/Tabs'
 import { ConfigTab } from './ConfigTab'
+import { LiveTab } from './LiveTab'
 import { MessagesTab } from './MessagesTab'
 
 interface TabProps {
@@ -20,7 +21,7 @@ function ComingSoon() {
  */
 const TABS: readonly { id: string; label: string; Panel: ComponentType<TabProps> }[] = [
   { id: 'messages', label: 'Messages', Panel: MessagesTab },
-  { id: 'live', label: 'Live', Panel: ComingSoon },
+  { id: 'live', label: 'Live', Panel: LiveTab },
   { id: 'config', label: 'Config', Panel: ConfigTab },
   { id: 'publish', label: 'Publish', Panel: ComingSoon },
 ]

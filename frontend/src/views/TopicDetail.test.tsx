@@ -74,10 +74,17 @@ describe('TopicDetail', () => {
   it('switches tabs through the URL and shows placeholders for unbuilt tabs', async () => {
     const user = setup('/c/dev/topics/t?tab=config')
 
-    await user.click(screen.getByRole('tab', { name: 'Live' }))
+    await user.click(screen.getByRole('tab', { name: 'Publish' }))
 
-    expect(screen.getByTestId('search')).toHaveTextContent('?tab=live')
-    expect(screen.getByRole('tab', { name: 'Live' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('search')).toHaveTextContent('?tab=publish')
+    expect(screen.getByRole('tab', { name: 'Publish' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByText('Coming soon')).toBeInTheDocument()
+  })
+
+  it('shows the live stream controls on the Live tab', () => {
+    setup('/c/dev/topics/t?tab=live')
+
+    expect(screen.getByRole('tab', { name: 'Live' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('button', { name: 'Start' })).toBeInTheDocument()
   })
 })
