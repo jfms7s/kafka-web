@@ -357,6 +357,7 @@ def test_unreachable_brokers_end_the_stream_with_an_error_frame(
 ) -> None:
     with client.websocket_connect(URL) as ws:
         consumer = streaming(consumers)
+        consumer.failing_metadata_calls = 1000  # the brokers really are gone: the probe fails too
         consumer.feed(ErrorEvent(KafkaError(KafkaError._ALL_BROKERS_DOWN, "1/1 brokers are down")))
         frame = ws.receive_json()
         assert close_code(ws) == 1011

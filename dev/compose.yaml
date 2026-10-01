@@ -1,0 +1,45 @@
+# Local single-node Kafka (KRaft) for kafka-web development.
+#
+#   localhost:9092  PLAINTEXT
+#   localhost:9094  SASL_SSL, SASL/PLAIN, user app / app-secret (also admin / admin-secret);
+#                   broker cert signed by the CA in certs/ (run ./gen-certs.sh first)
+#
+# No compose provider is installed system-wide on Fedora; run it with
+#   uvx podman-compose -f dev/compose.yaml up -d
+# (or `docker compose -f dev/compose.yaml up -d`).
+#
+# The SASL_SSL listener is named EXTERNAL on purpose: the apache/kafka entrypoint rejects a PEM
+# keystore on a listener whose name looks like SSL:// / SASL_*, so only the security protocol map
+# says SASL_SSL. Same setup as backend/tests/integration/conftest.py.
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: kafka-web-dev
+    ports:
+      - "127.0.0.1:9092:9092"
+      - "127.0.0.1:9094:9094"
+    volumes:
+      # :Z relabels for SELinux (Fedora); certs/ is user-owned, so no further permission setup.
+      - ./certs:/certs:ro,Z
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:SASL_SSL
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_LISTENER_NAME_EXTERNAL_PLAIN_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="admin" password="admin-secret"
+        user_admin="admin-secret" user_app="app-secret";
+      KAFKA_SSL_KEYSTORE_TYPE: PEM
+      KAFKA_SSL_KEYSTORE_LOCATION: /certs/broker.pem
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"

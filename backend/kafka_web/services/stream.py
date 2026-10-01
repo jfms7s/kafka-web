@@ -14,7 +14,14 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any, Literal
 
-from confluent_kafka import OFFSET_END, Consumer, KafkaError, Message, TopicPartition
+from confluent_kafka import (
+    OFFSET_END,
+    Consumer,
+    KafkaError,
+    KafkaException,
+    Message,
+    TopicPartition,
+)
 from pydantic import BaseModel, Field
 
 from kafka_web.errors import AppError
@@ -35,12 +42,17 @@ POLL_INTERVAL_S = 0.5
 # waits at most SETUP_SLICE_S and timed-out attempts are retried: between slices the stop event
 # is checked, so a client leaving during a slow setup is honoured within about a second.
 SETUP_SLICE_S = 1.0
+PROBE_TIMEOUT_S = 2.0  # how long an _ALL_BROKERS_DOWN report is double-checked with a metadata call
 _RETRYABLE_SETUP_CODES = {"kafka_timeout", "broker_unreachable"}
 # Client-level errors (broker connections, authentication) never come out of `poll()`: librdkafka
 # hands them to the `error_cb`, which it calls while serving `poll()` on the worker thread. These
 # end the stream; anything else (e.g. one `_TRANSPORT` disconnect, which librdkafka retries by
 # itself) is only logged. A dead cluster thus surfaces as an error frame instead of a stream
 # that silently stays "live".
+#
+# `_ALL_BROKERS_DOWN` is the exception: librdkafka also raises it while it is still working through
+# a bootstrap server's addresses (`localhost` resolving to ::1, refused, before 127.0.0.1 connects
+# over TLS), so it is only believed when a metadata probe fails as well.
 _FATAL_CLIENT_ERRORS = {
     KafkaError._ALL_BROKERS_DOWN,
     KafkaError.SASL_AUTHENTICATION_FAILED,
@@ -216,11 +228,25 @@ class StreamWorker(threading.Thread):
             if budget.remaining() <= 0:
                 raise failure  # the last real cause, not just "out of time"
 
+    def _confirm_client_error(self, consumer: Consumer) -> None:
+        """Raise the reported client error, unless it was a transient all-brokers-down."""
+        error = self._client_error
+        assert error is not None
+        if error.code() == KafkaError._ALL_BROKERS_DOWN:
+            try:
+                consumer.list_topics(self._topic, timeout=PROBE_TIMEOUT_S)
+            except KafkaException:
+                pass  # the brokers really are unreachable
+            else:
+                self._client_error = None
+                return
+        raise map_kafka_exception(error)
+
     def _poll(self, consumer: Consumer) -> None:
         while not self.stop_event.is_set():
             msg = call_with_timeout(lambda: consumer.poll(self._poll_interval))
             if self._client_error is not None:  # reported to the error_cb during that poll
-                raise map_kafka_exception(self._client_error)
+                self._confirm_client_error(consumer)
             if msg is None:
                 continue
             err = msg.error()  # a per-partition consumer error (unknown topic, ACL, ...)
