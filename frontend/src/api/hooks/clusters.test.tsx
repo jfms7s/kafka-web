@@ -26,7 +26,7 @@ function setup(respond: (request: Request) => Response) {
   const lastRequest = () => fetchMock.mock.calls.at(-1)![0]
   const invalidatedKeys = () =>
     invalidate.mock.calls.map(([filters]) => filters?.queryKey as unknown[])
-  return { wrapper, invalidatedKeys, lastRequest }
+  return { client, wrapper, invalidatedKeys, lastRequest }
 }
 
 const BODY = {
@@ -35,6 +35,16 @@ const BODY = {
   bootstrap_servers: 'b:9092',
   security_protocol: 'PLAINTEXT' as const,
   read_only: false,
+}
+
+const SECRET_BODY = {
+  ...BODY,
+  security_protocol: 'SASL_SSL' as const,
+  sasl_mechanism: 'PLAIN' as const,
+  sasl_username: 'svc',
+  sasl_password: 'hunter2',
+  truststore_base64: 'dHJ1c3Q=',
+  truststore_password: 'hunter2-trust',
 }
 
 describe('cluster queries', () => {
@@ -78,6 +88,21 @@ describe('cluster mutations', () => {
     const keys = invalidatedKeys()
     expect(keys).toContainEqual(['clusters'])
     expect(keys).toContainEqual(['status'])
+  })
+
+  it.each([
+    ['create', () => { const m = useCreateCluster(); return () => m.mutateAsync(SECRET_BODY) }, () => Response.json({}, { status: 201 })],
+    ['update', () => { const m = useUpdateCluster('dev'); return () => m.mutateAsync(SECRET_BODY) }, OK],
+    ['test', () => { const m = useTestCluster(); return () => m.mutateAsync({ input: SECRET_BODY }) }, () => Response.json({ ok: true })],
+  ] as const)('%s does not keep its secrets in the mutation cache', async (_name, useTrigger, respond) => {
+    const { client, wrapper } = setup(respond)
+    const { result, unmount } = renderHook(() => useTrigger(), { wrapper })
+    await act(async () => {
+      await result.current()
+    })
+    unmount()
+    await waitFor(() => expect(client.getMutationCache().getAll()).toHaveLength(0))
+    expect(JSON.stringify(client.getMutationCache().getAll())).not.toContain('hunter2')
   })
 
   it('test sends ?existing=<name> in edit mode', async () => {

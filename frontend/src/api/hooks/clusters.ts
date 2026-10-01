@@ -22,11 +22,17 @@ export const useCluster = (name: string, enabled = true) =>
 export const useStatus = () =>
   useQuery({ queryKey: statusKey, queryFn: () => unwrap(api.GET('/api/status')) })
 
-/** A mutation that refreshes the cluster list and connection status however it ends. */
+/**
+ * A mutation that refreshes the cluster list and connection status however it ends.
+ *
+ * `gcTime: 0` drops the mutation from the cache as soon as nothing observes it: its variables
+ * carry the SASL password and truststore, which must not linger in memory.
+ */
 function useClusterMutation<TVars, TData>(mutationFn: (vars: TVars) => Promise<TData>) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn,
+    gcTime: 0,
     onSettled: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: clustersKey }),
