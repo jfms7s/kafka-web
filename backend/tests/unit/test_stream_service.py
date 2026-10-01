@@ -353,14 +353,13 @@ def test_transport_blip_does_not_end_the_stream() -> None:
 @pytest.mark.parametrize(
     ("err", "status", "code"),
     [
-        (KafkaError(KafkaError._ALL_BROKERS_DOWN), 502, "broker_unreachable"),
         (KafkaError(KafkaError.SASL_AUTHENTICATION_FAILED), 401, "authentication_failed"),
         (KafkaError(KafkaError._AUTHENTICATION), 401, "authentication_failed"),
         (KafkaError(KafkaError.TOPIC_AUTHORIZATION_FAILED), 403, "authorization_failed"),
         (KafkaError(KafkaError.CLUSTER_AUTHORIZATION_FAILED), 403, "authorization_failed"),
         (KafkaError(KafkaError._FATAL, fatal=True), 502, "broker_error"),
     ],
-    ids=["all-brokers-down", "sasl", "authentication", "topic-acl", "cluster-acl", "fatal"],
+    ids=["sasl", "authentication", "topic-acl", "cluster-acl", "fatal"],
 )
 def test_fatal_client_errors_end_the_stream(err: KafkaError, status: int, code: str) -> None:
     consumers = LiveConsumers()
@@ -374,6 +373,38 @@ def test_fatal_client_errors_end_the_stream(err: KafkaError, status: int, code: 
     assert worker.error is not None
     assert (worker.error.status, worker.error.code) == (status, code)
     assert consumer.closed
+
+
+def test_all_brokers_down_ends_the_stream_when_the_brokers_stay_unreachable() -> None:
+    consumers = LiveConsumers()
+    worker, _, _ = start_worker(consumers)
+    consumer = started(consumers)
+
+    consumer.failing_metadata_calls = 1000  # the outage is real: the probe cannot get metadata
+    consumer.feed(ErrorEvent(KafkaError(KafkaError._ALL_BROKERS_DOWN)))
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert worker.error is not None
+    assert (worker.error.status, worker.error.code) == (502, "broker_unreachable")
+    assert consumer.closed
+
+
+def test_transient_all_brokers_down_does_not_end_the_stream() -> None:
+    """librdkafka reports ALL_BROKERS_DOWN while it is still working through a bootstrap
+    server's addresses (e.g. `localhost` = ::1 refused, then 127.0.0.1 connecting over TLS), and
+    the brokers are fine a moment later: a probe that succeeds keeps the stream live."""
+    consumers = LiveConsumers()
+    worker, queue, stop = start_worker(consumers)
+    consumer = started(consumers)
+
+    consumer.feed(ErrorEvent(KafkaError(KafkaError._ALL_BROKERS_DOWN)), FakeMessage(offset=7))
+    messages = wait_for(queue, 1)
+
+    assert worker.is_alive()
+    stopped(worker, stop)
+    assert [m.offset() for m in messages] == [7]
+    assert worker.error is None
 
 
 def test_unknown_topic_fails_setup_without_assigning() -> None:
