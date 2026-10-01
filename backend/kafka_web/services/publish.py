@@ -4,10 +4,20 @@ import csv
 import io
 import json
 import re
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from kafka_web.errors import ValidationFailed
+from confluent_kafka import KafkaError, KafkaException, Message, Producer
+
+from kafka_web.errors import AppError, BrokerError, KafkaTimeout, NotFound, ValidationFailed
+from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception, redact
+
+DEFAULT_FLUSH_TIMEOUT_S = 30.0
+_QUEUE_FULL_POLL_S = 0.5
+_REPORT_GRACE_S = 0.5  # how long to wait for delivery reports another thread is still serving
+_METADATA_TIMEOUT_S = 10.0
 
 _BOM = b"\xef\xbb\xbf"
 _FORMAT_PREFIX = re.compile(rb"(?:\xef\xbb\xbf)?\s*(.?)", re.DOTALL)
@@ -188,3 +198,175 @@ def _json_headers(headers: Any) -> list[tuple[str, bytes]]:
     ):
         return [(name, _header_value(value)) for name, value in pairs]
     raise _BadItem("headers must be an object or a list of [name, value] pairs")
+
+
+# --- delivery ----------------------------------------------------------------------------------
+
+
+@dataclass
+class RowResult:
+    row: int
+    ok: bool
+    partition: int | None = None
+    offset: int | None = None
+    error: str | None = None
+
+
+@dataclass
+class BatchResult:
+    succeeded: int
+    failed: int
+    results: list[RowResult]
+
+
+class _Delivery:
+    """What happened to one message. Written by the delivery callback, which librdkafka runs on
+    whichever thread polls or flushes the (shared) producer, and read after the flush."""
+
+    def __init__(self) -> None:
+        self.queued = False
+        self.reported = False
+        self.partition: int | None = None
+        self.offset: int | None = None
+        self.cause: Exception | None = None  # a KafkaError / KafkaException / ValueError ...
+        self.error: str | None = None
+
+    def fail(self, error: str, cause: Exception | None = None) -> None:
+        self.error, self.cause = error, cause
+
+    def on_delivery(self, err: KafkaError | None, message: Message) -> None:
+        if err is not None:
+            self.fail(redact(err.str()) or err.name(), err)
+        else:
+            self.partition, self.offset = message.partition(), message.offset()
+        self.reported = True
+
+    @property
+    def delivered(self) -> bool:
+        return self.queued and self.reported and self.error is None
+
+    def failure(self) -> str | None:
+        if self.error is not None:
+            return self.error
+        return None if self.delivered else "delivery timeout"
+
+
+def _kwargs(message: OutMessage, delivery: _Delivery) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "value": message.value,
+        "key": message.key,
+        "headers": message.headers or None,
+        "on_delivery": delivery.on_delivery,
+    }
+    if message.partition is not None:
+        kwargs["partition"] = message.partition
+    return kwargs
+
+
+def _produce(
+    producer: Producer, topic: str, message: OutMessage, delivery: _Delivery, deadline: float
+) -> None:
+    """Queue one message, waiting out a full local queue until `deadline`."""
+    while True:
+        try:
+            producer.produce(topic, **_kwargs(message, delivery))
+        except BufferError as exc:
+            if time.monotonic() >= deadline:
+                delivery.fail("Producer queue is full", exc)
+                return
+            producer.poll(_QUEUE_FULL_POLL_S)
+        except (KafkaException, ValueError, TypeError) as exc:
+            detail = exc.args[0].str() if isinstance(exc, KafkaException) else str(exc)
+            delivery.fail(redact(str(detail)) or type(exc).__name__, exc)
+            return
+        else:
+            delivery.queued = True
+            return
+
+
+def _send(
+    producer: Producer, topic: str, messages: Sequence[OutMessage], flush_timeout: float
+) -> list[_Delivery]:
+    deliveries = [_Delivery() for _ in messages]
+    deadline = time.monotonic() + flush_timeout
+    for message, delivery in zip(messages, deliveries, strict=True):
+        _produce(producer, topic, message, delivery, deadline)
+        producer.poll(0)  # serve delivery reports as we go
+    unflushed = producer.flush(flush_timeout)
+    if unflushed == 0:
+        # The queue is empty, but a report taken off it by another thread may still be running.
+        grace = time.monotonic() + _REPORT_GRACE_S
+        while time.monotonic() < grace and not all(d.reported for d in deliveries if d.queued):
+            producer.poll(0.05)
+    return deliveries
+
+
+def publish(
+    producer: Producer,
+    topic: str,
+    items: Sequence[Item],
+    flush_timeout: float = DEFAULT_FLUSH_TIMEOUT_S,
+) -> BatchResult:
+    """Produce every message, then flush; report each row. A `RowError` is a failed row and
+    does not stop the batch. Row numbers of messages are their 1-based position in `items`."""
+    sendable = [
+        (row, item) for row, item in enumerate(items, start=1) if isinstance(item, OutMessage)
+    ]
+    deliveries = iter(_send(producer, topic, [m for _, m in sendable], flush_timeout))
+    results = []
+    for row, item in enumerate(items, start=1):
+        if isinstance(item, RowError):
+            results.append(RowResult(item.row, ok=False, error=item.error))
+            continue
+        delivery = next(deliveries)
+        error = delivery.failure()
+        if error is None:
+            results.append(
+                RowResult(row, ok=True, partition=delivery.partition, offset=delivery.offset)
+            )
+        else:
+            results.append(RowResult(row, ok=False, error=error))
+    failed = sum(1 for r in results if not r.ok)
+    return BatchResult(succeeded=len(results) - failed, failed=failed, results=results)
+
+
+def _failure_as_app_error(delivery: _Delivery) -> AppError:
+    cause = delivery.cause
+    if cause is None:
+        return KafkaTimeout("The message was not acknowledged in time")
+    if isinstance(cause, ValueError | TypeError):
+        return ValidationFailed(delivery.error or "The message was rejected")
+    if isinstance(cause, BufferError):
+        return BrokerError("The producer queue is full", code="producer_queue_full")
+    return map_kafka_exception(cause)
+
+
+def publish_one(
+    producer: Producer,
+    topic: str,
+    message: OutMessage,
+    flush_timeout: float = DEFAULT_FLUSH_TIMEOUT_S,
+) -> tuple[int, int]:
+    """Produce one message and return its `(partition, offset)`; a failure raises the mapped
+    `AppError` (unlike `publish`, which reports it as a failed row)."""
+    [delivery] = _send(producer, topic, [message], flush_timeout)
+    if not delivery.delivered:
+        raise _failure_as_app_error(delivery)
+    assert delivery.partition is not None and delivery.offset is not None
+    return delivery.partition, delivery.offset
+
+
+def require_topic(admin: Any, topic: str, timeout: float = _METADATA_TIMEOUT_S) -> int:
+    """The partition count of `topic`; 404 `topic_not_found` if the cluster has no such topic.
+
+    Looks the topic up in the full listing, never by asking the brokers about that one name: a
+    broker with `auto.create.topics.enable` may create a topic that is merely asked about, and
+    publishing must never create one.
+    """
+    metadata = call_with_timeout(lambda: admin.list_topics(timeout=timeout))
+    found = metadata.topics.get(topic)
+    if found is None:
+        raise NotFound(f"Topic {topic!r} does not exist", code="topic_not_found")
+    if found.error is not None:
+        raise map_kafka_exception(found.error)
+    return len(found.partitions)

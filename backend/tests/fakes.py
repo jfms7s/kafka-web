@@ -372,3 +372,82 @@ class LiveConsumers:
             assert time.monotonic() < deadline, "no consumer was created"
             time.sleep(0.01)
         return self.created[-1]
+
+
+class DeliveringProducer:
+    """Producer double for publishing: `produce` queues, `poll`/`flush` deliver in order.
+
+    Scripts, all keyed by the 0-based index of the *accepted* `produce` call: `fail` makes the
+    delivery report an error, `silent` never reports (undelivered); `buffer_errors` makes the
+    first N `produce` attempts raise `BufferError`; `produce_errors` makes the Nth *attempt*
+    raise the given exception. With `deliver_on_flush=False`, `flush` reports nothing and returns
+    the queue length (a broker that never answers); `late` is delivered by the first `poll` after
+    the first `flush` (a report served by another thread's poll).
+    """
+
+    def __init__(
+        self,
+        *,
+        fail: dict[int, Any] | None = None,
+        silent: set[int] | None = None,
+        buffer_errors: int = 0,
+        produce_errors: dict[int, Exception] | None = None,
+        late: set[int] | None = None,
+        deliver_on_flush: bool = True,
+    ):
+        self.fail = fail or {}
+        self.silent = silent or set()
+        self.late = late or set()
+        self.buffer_errors = buffer_errors
+        self.produce_errors = produce_errors or {}
+        self.deliver_on_flush = deliver_on_flush
+        self.attempts = 0
+        self.produced: list[dict[str, Any]] = []
+        self.poll_timeouts: list[float | None] = []
+        self.flush_timeouts: list[float | None] = []
+        self._queue: list[tuple[int, dict[str, Any]]] = []
+        self._offsets: dict[int, int] = {}
+        self._flushed = False
+
+    def produce(self, topic: str, **kwargs: Any) -> None:
+        attempt = self.attempts
+        self.attempts += 1
+        if attempt in self.produce_errors:
+            raise self.produce_errors[attempt]
+        if self.buffer_errors > 0:
+            self.buffer_errors -= 1
+            raise BufferError("Local: Queue full")
+        record = {"topic": topic, **kwargs}
+        self._queue.append((len(self.produced), record))
+        self.produced.append(record)
+
+    def _report(self, index: int, record: dict[str, Any]) -> None:
+        callback = record["on_delivery"]
+        if index in self.fail:
+            callback(self.fail[index], FakeMessage(partition=-1, offset=-1))
+            return
+        partition = record.get("partition", index % 2)
+        offset = self._offsets.get(partition, 100)
+        self._offsets[partition] = offset + 1
+        callback(None, FakeMessage(partition=partition, offset=offset))
+
+    def _deliver(self, *, include_late: bool) -> None:
+        kept = []
+        for index, record in self._queue:
+            if index in self.silent or (index in self.late and not include_late):
+                kept.append((index, record))
+            else:
+                self._report(index, record)
+        self._queue = kept
+
+    def poll(self, timeout: float | None = None) -> int:
+        self.poll_timeouts.append(timeout)
+        self._deliver(include_late=self._flushed)
+        return 0
+
+    def flush(self, timeout: float | None = None) -> int:
+        self.flush_timeouts.append(timeout)
+        self._flushed = True
+        if self.deliver_on_flush:
+            self._deliver(include_late=False)
+        return len([1 for index, _ in self._queue if index not in self.late])
