@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ToastProvider } from '../components/Toasts'
 import { TopicDetail } from './TopicDetail'
 
 function Search() {
@@ -12,26 +13,30 @@ function Search() {
 function setup(entry: string) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () =>
-      Response.json({ name: 't', replication_factor: 1, partitions: [], entries: [] }),
+    vi.fn(async (request: Request) =>
+      new URL(request.url).pathname === '/api/clusters/dev'
+        ? Response.json({ name: 'dev', read_only: false })
+        : Response.json({ name: 't', replication_factor: 1, partitions: [], entries: [] }),
     ),
   )
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[entry]}>
-        <Routes>
-          <Route
-            path="/c/:cluster/topics/:topic"
-            element={
-              <>
-                <TopicDetail />
-                <Search />
-              </>
-            }
-          />
-        </Routes>
-      </MemoryRouter>
+      <ToastProvider>
+        <MemoryRouter initialEntries={[entry]}>
+          <Routes>
+            <Route
+              path="/c/:cluster/topics/:topic"
+              element={
+                <>
+                  <TopicDetail />
+                  <Search />
+                </>
+              }
+            />
+          </Routes>
+        </MemoryRouter>
+      </ToastProvider>
     </QueryClientProvider>,
   )
   return userEvent.setup()
@@ -62,7 +67,6 @@ describe('TopicDetail', () => {
     setup('/c/dev/topics/t')
 
     expect(screen.getByRole('button', { name: 'Fetch' })).toBeInTheDocument()
-    expect(screen.queryByText('Coming soon')).not.toBeInTheDocument()
   })
 
   it('falls back to the first tab for an unknown ?tab=', () => {
@@ -71,14 +75,14 @@ describe('TopicDetail', () => {
     expect(screen.getByRole('tab', { name: 'Messages' })).toHaveAttribute('aria-selected', 'true')
   })
 
-  it('switches tabs through the URL and shows placeholders for unbuilt tabs', async () => {
+  it('switches tabs through the URL', async () => {
     const user = setup('/c/dev/topics/t?tab=config')
 
     await user.click(screen.getByRole('tab', { name: 'Publish' }))
 
     expect(screen.getByTestId('search')).toHaveTextContent('?tab=publish')
     expect(screen.getByRole('tab', { name: 'Publish' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByText('Coming soon')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Publish a message' })).toBeInTheDocument()
   })
 
   it('shows the live stream controls on the Live tab', () => {

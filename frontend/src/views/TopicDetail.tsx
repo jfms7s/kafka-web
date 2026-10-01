@@ -5,25 +5,21 @@ import { Tabs } from '../components/Tabs'
 import { ConfigTab } from './ConfigTab'
 import { LiveTab } from './LiveTab'
 import { MessagesTab } from './MessagesTab'
+import { PublishTab } from './PublishTab'
 
 interface TabProps {
   cluster: string
   topic: string
 }
 
-function ComingSoon() {
-  return <p className="text-slate-600">Coming soon</p>
-}
-
 /**
- * The topic tab registry. Later features replace a `ComingSoon` entry with their component;
- * order here is the order on screen and the first entry is the default tab.
+ * The topic tab registry: order here is the order on screen and the first entry is the default.
  */
 const TABS: readonly { id: string; label: string; Panel: ComponentType<TabProps> }[] = [
   { id: 'messages', label: 'Messages', Panel: MessagesTab },
   { id: 'live', label: 'Live', Panel: LiveTab },
   { id: 'config', label: 'Config', Panel: ConfigTab },
-  { id: 'publish', label: 'Publish', Panel: ComingSoon },
+  { id: 'publish', label: 'Publish', Panel: PublishTab },
 ]
 
 export function TopicDetail() {

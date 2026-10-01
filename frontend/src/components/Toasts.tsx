@@ -6,12 +6,14 @@ const LIFETIME_MS = 8000
 
 interface ToastItem {
   id: number
+  kind: 'error' | 'success'
   message: string
   code?: string
 }
 
 interface ToastApi {
   error: (error: unknown) => void
+  success: (message: string) => void
 }
 
 const ToastContext = createContext<ToastApi | null>(null)
@@ -31,20 +33,31 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((current) => current.filter((t) => t.id !== id))
   }, [])
 
-  const error = useCallback(
-    (cause: unknown) => {
+  const show = useCallback(
+    (item: Omit<ToastItem, 'id'>) => {
       const id = nextId.current++
-      const item: ToastItem =
-        cause instanceof ApiError
-          ? { id, message: cause.message, code: cause.code }
-          : { id, message: cause instanceof Error ? cause.message : 'Something went wrong' }
-      setToasts((current) => [...current, item])
+      setToasts((current) => [...current, { id, ...item }])
       setTimeout(() => dismiss(id), LIFETIME_MS)
     },
     [dismiss],
   )
 
-  const api = useMemo(() => ({ error }), [error])
+  const error = useCallback(
+    (cause: unknown) =>
+      show(
+        cause instanceof ApiError
+          ? { kind: 'error', message: cause.message, code: cause.code }
+          : {
+              kind: 'error',
+              message: cause instanceof Error ? cause.message : 'Something went wrong',
+            },
+      ),
+    [show],
+  )
+
+  const success = useCallback((message: string) => show({ kind: 'success', message }), [show])
+
+  const api = useMemo(() => ({ error, success }), [error, success])
 
   return (
     <ToastContext.Provider value={api}>
@@ -53,8 +66,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            role="alert"
-            className="flex items-start gap-3 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-900 shadow"
+            role={t.kind === 'error' ? 'alert' : 'status'}
+            className={`flex items-start gap-3 rounded border p-3 text-sm shadow ${
+              t.kind === 'error'
+                ? 'border-red-300 bg-red-50 text-red-900'
+                : 'border-green-300 bg-green-50 text-green-900'
+            }`}
           >
             <div className="flex-1">
               <p>{t.message}</p>
@@ -63,7 +80,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <button
               type="button"
               onClick={() => dismiss(t.id)}
-              className="rounded px-2 text-red-700 hover:bg-red-100"
+              className={`rounded px-2 ${
+                t.kind === 'error' ? 'text-red-700 hover:bg-red-100' : 'text-green-800 hover:bg-green-100'
+              }`}
             >
               Dismiss
             </button>

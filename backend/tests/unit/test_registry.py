@@ -103,6 +103,8 @@ def test_get_connects_lazily(store: ClusterStore, registry: ConnectionRegistry, 
     assert admin.conf["socket.connection.setup.timeout.ms"] == "10000"
     assert producer.conf["socket.connection.setup.timeout.ms"] == "10000"
     assert producer.conf["message.timeout.ms"] == "30000"
+    # A topic deleted between the existence check and produce() must not be re-created.
+    assert producer.conf["allow.auto.create.topics"] == "false"
     assert conn.client_config["bootstrap.servers"] == "b1:9092"
     assert all(isinstance(v, str) for v in conn.client_config.values())
 

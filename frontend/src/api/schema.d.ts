@@ -156,7 +156,25 @@ export interface paths {
         /** Snapshot Messages */
         get: operations["snapshot_messages_api_clusters__name__topics__topic__messages_get"];
         put?: never;
-        post?: never;
+        /** Publish Message */
+        post: operations["publish_message_api_clusters__name__topics__topic__messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/clusters/{name}/topics/{topic}/messages/bulk": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Publish Bulk */
+        post: operations["publish_bulk_api_clusters__name__topics__topic__messages_bulk_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -167,6 +185,15 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** BatchResultView */
+        BatchResultView: {
+            /** Succeeded */
+            succeeded: number;
+            /** Failed */
+            failed: number;
+            /** Results */
+            results: components["schemas"]["RowResultView"][];
+        };
         /** CertView */
         CertView: {
             /** Subject */
@@ -350,6 +377,42 @@ export interface components {
             replicas: number[];
             /** Isr */
             isr: number[];
+        };
+        /** PublishRequest */
+        PublishRequest: {
+            /** Key */
+            key?: string | null;
+            /** Value */
+            value: string;
+            /**
+             * Headers
+             * @description A JSON object or key=value lines
+             */
+            headers?: string | null;
+            /** Partition */
+            partition?: number | null;
+        };
+        /** PublishedView */
+        PublishedView: {
+            /** Ok */
+            ok: boolean;
+            /** Partition */
+            partition: number;
+            /** Offset */
+            offset: number;
+        };
+        /** RowResultView */
+        RowResultView: {
+            /** Row */
+            row: number;
+            /** Ok */
+            ok: boolean;
+            /** Partition */
+            partition?: number | null;
+            /** Offset */
+            offset?: number | null;
+            /** Error */
+            error?: string | null;
         };
         /** StatusView */
         StatusView: {
@@ -757,6 +820,84 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MessageListView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    publish_message_api_clusters__name__topics__topic__messages_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+                topic: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishedView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    publish_bulk_api_clusters__name__topics__topic__messages_bulk_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+                topic: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file: string;
+                    confirm: string;
+                    key_column?: string;
+                    value_column?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BatchResultView"];
                 };
             };
             /** @description Validation Error */

@@ -38,6 +38,11 @@ class NotFound(AppError):
     code = "not_found"
 
 
+class PayloadTooLarge(AppError):
+    status = 413
+    code = "payload_too_large"
+
+
 class Conflict(AppError):
     status = 409
     code = "conflict"
