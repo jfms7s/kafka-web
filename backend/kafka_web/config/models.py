@@ -32,6 +32,10 @@ FORBIDDEN_EXTRA_PREFIXES = ("bootstrap.servers", "security.protocol", "sasl.", "
 _FORBIDDEN_EXTRA_EXACT = (*FORBIDDEN_EXTRA_PREFIXES[:2], "metadata.broker.list")
 _FORBIDDEN_EXTRA_STARTS = FORBIDDEN_EXTRA_PREFIXES[2:]
 
+# Private key material whose name has no "password"/"secret"; clusters.yaml holds no secrets.
+_SECRET_EXTRA_EXACT = ("ssl.key.pem", "ssl.keystore.key")
+_SECRET_EXTRA_WORDS = ("password", "secret")
+
 _NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
@@ -77,6 +81,13 @@ class ClusterBase(BaseModel):
     @classmethod
     def _extra_must_not_shadow_typed_fields(cls, extra: dict[str, str]) -> dict[str, str]:
         for key in extra:
+            lowered = key.lower()
+            if lowered in _SECRET_EXTRA_EXACT or any(w in lowered for w in _SECRET_EXTRA_WORDS):
+                raise ValidationFailed(
+                    f"extra: property {key!r}: secrets cannot be stored in extra "
+                    "(clusters.yaml holds no secrets)",
+                    field="extra",
+                )
             if key in _FORBIDDEN_EXTRA_EXACT or key.startswith(_FORBIDDEN_EXTRA_STARTS):
                 raise ValidationFailed(
                     f"extra: property {key!r} is managed by a dedicated field", field="extra"

@@ -115,6 +115,30 @@ def test_forbidden_exact_extra_keys_rejected(key):
     assert exc.value.field == "extra"
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ssl.key.password",
+        "ssl.keystore.password",
+        "sasl.oauthbearer.client.secret",
+        "Some.Custom.PASSWORD",
+        "ssl.key.pem",
+        "ssl.keystore.key",
+    ],
+)
+def test_secrets_in_extra_rejected_without_echoing_the_value(key):
+    with pytest.raises(ValidationFailed) as exc:
+        make(extra={key: "hunter2-value"})
+    assert exc.value.field == "extra"
+    assert "secrets cannot be stored in extra (clusters.yaml holds no secrets)" in exc.value.message
+    assert "hunter2-value" not in exc.value.message
+
+
+def test_non_secret_ssl_extra_still_accepted():
+    extra = {"ssl.endpoint.identification.algorithm": "none"}
+    assert make(extra=extra).extra == extra
+
+
 def test_other_extra_accepted():
     assert make(extra={"fetch.max.bytes": "1"}).extra == {"fetch.max.bytes": "1"}
 
