@@ -207,3 +207,45 @@ def test_unknown_keys_are_rejected_naming_the_key(model):
         model(name="a", env="e", bootstrap_servers="b:1", **{"read-only": True})
     assert exc.value.field == "read-only"
     assert "read-only" in exc.value.message
+
+
+NATIVE_CODE_KEYS = [
+    "plugin.library.paths",
+    "Plugin.Library.Paths",
+    "ssl.engine.location",
+    "ssl.engine.id",
+    "ssl.engine.callback_data",
+    "ssl.providers",
+    "error_cb",
+    "stats_cb",
+    "throttle_cb",
+    "oauth_cb",
+    "on_delivery",
+    "on_commit",
+    "logger",
+    "opaque",
+]
+
+
+@pytest.mark.parametrize("key", NATIVE_CODE_KEYS)
+def test_extra_keys_that_load_code_or_set_callbacks_rejected(key):
+    with pytest.raises(ValidationFailed) as exc:
+        make(extra={key: "/tmp/evil-value.so"})
+    assert exc.value.field == "extra"
+    assert key in exc.value.message
+    assert "can load native code or set a callback" in exc.value.message
+    assert "/tmp/evil-value.so" not in exc.value.message
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ssl.key.location",
+        "ssl.certificate.location",
+        "ssl.keystore.location",
+        "client.rack",
+        "debug",
+    ],
+)
+def test_file_and_tuning_extra_keys_still_accepted(key):
+    assert make(extra={key: "x"}).extra == {key: "x"}

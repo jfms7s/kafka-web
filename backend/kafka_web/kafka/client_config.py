@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from kafka_web.config.models import ClusterConfig
+from kafka_web.config.models import ClusterConfig, loads_code
 
 CLIENT_ID = "kafka-web"
 
@@ -30,5 +30,8 @@ def build_client_config(
         conf["ssl.ca.location"] = str(ca_location)
         conf["ssl.endpoint.identification.algorithm"] = "https"
     conf["client.id"] = CLIENT_ID
+    # Validation already rejects these; refuse again so no path can hand them to librdkafka.
+    if blocked := [key for key in cfg.extra if loads_code(key)]:
+        raise ValueError(f"extra holds properties that load code: {', '.join(blocked)}")
     conf.update(cfg.extra)
     return conf

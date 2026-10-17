@@ -109,6 +109,21 @@ def test_list_invalid_entry_raises_config_file_invalid(store: ClusterStore, root
     assert exc.value.status == 500
 
 
+def test_list_entry_loading_native_code_raises_config_file_invalid(store: ClusterStore, root: Path):
+    write_yaml(
+        root,
+        "clusters:\n"
+        "  - name: dev\n"
+        "    env: dev\n"
+        "    bootstrap_servers: 'b:1'\n"
+        "    extra: {plugin.library.paths: /tmp/evil-lib.so}\n",
+    )
+    with pytest.raises(ConfigFileInvalid) as exc:
+        store.list()
+    assert "plugin.library.paths" in exc.value.message
+    assert "/tmp/evil-lib.so" not in exc.value.message
+
+
 def test_list_tls_entry_without_truststore_names_the_field(store: ClusterStore, root: Path):
     write_yaml(
         root,
