@@ -40,6 +40,22 @@ class _TruststoreUnusable(Exception):
         self.reason = reason
 
 
+def _normalised_servers(servers: str) -> str:
+    return ",".join(part.strip() for part in servers.split(","))
+
+
+def _same_sasl_target(inp: ClusterInput, existing: ClusterConfig | None) -> bool:
+    """Whether `inp` would send a SASL password to the same place `existing` does."""
+    return (
+        existing is not None
+        and existing.uses_sasl
+        and _normalised_servers(inp.bootstrap_servers)
+        == _normalised_servers(existing.bootstrap_servers)
+        and inp.security_protocol == existing.security_protocol
+        and inp.sasl_mechanism == existing.sasl_mechanism
+    )
+
+
 def _secret_value(secret: Any) -> str | None:
     """Unwrap an optional `SecretStr`; an empty value means "not provided"."""
     return (secret.get_secret_value() if secret is not None else "") or None
@@ -154,6 +170,14 @@ class ClusterStore:
             if password is None and not (existing is not None and existing.uses_sasl):
                 raise ValidationFailed(
                     "sasl_password: required for SASL protocols",
+                    code="sasl_password_required",
+                    field="sasl_password",
+                )
+            if password is None and not _same_sasl_target(inp, existing):
+                # The stored secret only ever goes to the brokers it was saved for.
+                raise ValidationFailed(
+                    "sasl_password: re-enter the password when changing the bootstrap servers, "
+                    "protocol or mechanism",
                     code="sasl_password_required",
                     field="sasl_password",
                 )
