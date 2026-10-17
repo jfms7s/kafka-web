@@ -18,21 +18,13 @@ from confluent_kafka.admin import AdminClient
 from kafka_web.config.models import ClusterConfig, ClusterInput
 from kafka_web.config.store import ClusterStore
 from kafka_web.errors import AppError, Conflict
-from kafka_web.kafka.client_config import build_client_config
+from kafka_web.kafka.client_config import admin_config, base_config, producer_config
 from kafka_web.kafka.errors import call_with_timeout, explain_connect_failure
 
 logger = logging.getLogger(__name__)
 
 ADMIN_TIMEOUT_S = 10.0
 PRODUCER_FLUSH_TIMEOUT_S = 5
-# Defaults under the user's `extra`: a TCP/TLS connect never waits longer than the admin calls.
-_CLIENT_DEFAULTS = {"socket.connection.setup.timeout.ms": "10000"}
-_PRODUCER_DEFAULTS = {"message.timeout.ms": "30000"}
-# Forced over the user's `extra`: no client of ours may ever create a topic. A metadata request
-# for a missing topic would otherwise create it on a broker that allows auto-creation (read-only
-# clusters included), and a topic deleted between publish's existence check and produce() would
-# be silently re-created.
-_FORCED = {"allow.auto.create.topics": "false"}
 
 
 def check_connectivity(admin: AdminClient, timeout: float = ADMIN_TIMEOUT_S) -> None:
@@ -236,12 +228,10 @@ class ConnectionRegistry:
         usability = self._store.usability(cfg)
         if not usability.usable:
             raise Conflict(usability.reason or "Cluster is unusable", code="cluster_unusable")
-        return _with_defaults(
-            build_client_config(
-                cfg,
-                sasl_password=self._store.sasl_password(cfg),
-                ca_location=self._store.truststore_path(cfg),
-            )
+        return base_config(
+            cfg,
+            sasl_password=self._store.sasl_password(cfg),
+            ca_location=self._store.truststore_path(cfg),
         )
 
     def test(self, inp: ClusterInput, existing: ClusterConfig | None) -> None:
@@ -260,8 +250,8 @@ class ConnectionRegistry:
                     ca_location = temp_pem = _write_temp_pem(pem)
                 else:
                     ca_location = self._stored_truststore(existing)
-            conf = build_client_config(cfg, sasl_password=password, ca_location=ca_location)
-            self._connected_admin(_with_defaults(conf))
+            conf = base_config(cfg, sasl_password=password, ca_location=ca_location)
+            self._connected_admin(conf)
         finally:
             if temp_pem is not None:
                 temp_pem.unlink(missing_ok=True)
@@ -296,9 +286,7 @@ class ConnectionRegistry:
     def _open(self, name: str) -> ClusterConnection:
         conf = self.client_config(name)
         admin = self._connected_admin(conf)
-        producer = call_with_timeout(
-            lambda: self._producer_factory({**_PRODUCER_DEFAULTS, **conf, **_FORCED})
-        )
+        producer = call_with_timeout(lambda: self._producer_factory(producer_config(conf)))
         return ClusterConnection(
             name=name,
             client_config=conf,
@@ -311,7 +299,7 @@ class ConnectionRegistry:
         """Create an admin client and run the connectivity check; nothing is kept on failure."""
         reported = _ReportedErrors()
         admin = call_with_timeout(
-            lambda: self._admin_factory({**conf, **_FORCED, "error_cb": reported})
+            lambda: self._admin_factory(admin_config(conf, error_cb=reported))
         )
         try:
             call_with_timeout(lambda: self._check(admin))
@@ -331,7 +319,3 @@ class ConnectionRegistry:
         if path is None or self._store.truststore_summary(existing) is None:
             raise Conflict("Stored truststore is missing or unreadable", code="cluster_unusable")
         return path
-
-
-def _with_defaults(conf: dict[str, str]) -> dict[str, str]:
-    return {**_CLIENT_DEFAULTS, **conf}

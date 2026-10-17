@@ -25,11 +25,11 @@ from confluent_kafka import (
 from pydantic import BaseModel, Field
 
 from kafka_web.errors import AppError
+from kafka_web.kafka.client_config import consumer_config
 from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception
 from kafka_web.services.consume import (
     SETUP_BUDGET_S,
     Budget,
-    consumer_config,
     fetch_watermarks,
     lookup_timestamp_offsets,
     partition_ids,
@@ -161,11 +161,9 @@ class StreamWorker(threading.Thread):
 
     def _config(self) -> dict[str, Any]:
         # No EOF events: a live stream sits at the end of the log most of the time.
-        return {
-            **consumer_config(self._client_config),
-            "enable.partition.eof": "false",
-            "error_cb": self._on_client_error,
-        }
+        return consumer_config(
+            self._client_config, partition_eof=False, error_cb=self._on_client_error
+        )
 
     def _on_client_error(self, err: KafkaError) -> None:
         if err.fatal() or err.code() in _FATAL_CLIENT_ERRORS:

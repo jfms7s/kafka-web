@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 
 from kafka_web.config.models import ClusterConfig
-from kafka_web.kafka.client_config import build_client_config
+from kafka_web.kafka.client_config import (
+    admin_config,
+    base_config,
+    build_client_config,
+    consumer_config,
+    producer_config,
+)
 
 
 def cfg(**kw) -> ClusterConfig:
@@ -132,3 +138,50 @@ def test_plaintext_gets_no_tls_verification_keys():
     conf = build_client_config(cfg(), sasl_password=None, ca_location=None)
     assert "enable.ssl.certificate.verification" not in conf
     assert "ssl.endpoint.identification.algorithm" not in conf
+
+
+def _on_error(err) -> None:
+    pass
+
+
+CLIENT_BUILDERS = {
+    "admin": lambda base: admin_config(base, error_cb=_on_error),
+    "producer": producer_config,
+    "snapshot consumer": lambda base: consumer_config(base, partition_eof=True),
+    "stream consumer": lambda base: consumer_config(base, partition_eof=False, error_cb=_on_error),
+}
+
+
+@pytest.mark.parametrize("build", CLIENT_BUILDERS.values(), ids=CLIENT_BUILDERS.keys())
+def test_no_client_type_can_auto_create_topics_but_extra_overrides_defaults(build):
+    extra = {"allow.auto.create.topics": "true", "socket.connection.setup.timeout.ms": "3000"}
+    base = base_config(cfg(extra=extra), sasl_password=None, ca_location=None)
+
+    conf = build(base)
+
+    assert conf["allow.auto.create.topics"] == "false"
+    assert conf["socket.connection.setup.timeout.ms"] == "3000"
+
+
+def test_defaults_apply_when_extra_is_silent():
+    base = base_config(cfg(), sasl_password=None, ca_location=None)
+    assert base["socket.connection.setup.timeout.ms"] == "10000"
+    assert producer_config(base)["message.timeout.ms"] == "30000"
+    assert "message.timeout.ms" not in admin_config(base, error_cb=_on_error)
+
+
+def test_producer_default_stays_under_extra():
+    cluster = cfg(extra={"message.timeout.ms": "5000"})
+    base = base_config(cluster, sasl_password=None, ca_location=None)
+    assert producer_config(base)["message.timeout.ms"] == "5000"
+
+
+@pytest.mark.parametrize("partition_eof", [True, False])
+def test_consumer_config_has_throwaway_group_keys_over_base(partition_eof):
+    base = {"bootstrap.servers": "b1:9092", "group.id": "theirs", "enable.auto.commit": "true"}
+    conf = consumer_config(base, partition_eof=partition_eof)
+    assert conf["group.id"].startswith("kafka-web-")
+    assert conf["enable.auto.commit"] == "false"
+    assert conf["auto.offset.reset"] == "earliest"
+    assert conf["enable.partition.eof"] == ("true" if partition_eof else "false")
+    assert "error_cb" not in conf
