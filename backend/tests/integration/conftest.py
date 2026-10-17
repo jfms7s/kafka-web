@@ -2,6 +2,11 @@
 
 Both brokers run `apache/kafka:3.9.1` in KRaft combined mode. Each listener's container port equals
 its host port, so the broker can advertise `localhost:<port>` before the port mapping exists.
+
+A test that should hold for both security setups takes the `broker` fixture through
+`@over_every_broker`: it then runs once as `[plaintext]` and once as `[sasl_ssl]`, with `cluster`,
+`topic_factory` and the setup producers following the chosen broker. Without the decorator
+`broker` is the PLAINTEXT one.
 """
 
 import os
@@ -10,17 +15,20 @@ import os
 os.environ.setdefault("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock")
 os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 
+import base64
 import contextlib
 import socket
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 from confluent_kafka import Consumer, KafkaException, TopicPartition
 from confluent_kafka.admin import AdminClient, NewTopic
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from fastapi.testclient import TestClient
 from testcontainers.core.container import DockerContainer
@@ -28,7 +36,7 @@ from testcontainers.core.container import DockerContainer
 from kafka_web.api.app import create_app
 from kafka_web.config.secrets import SecretStore
 from kafka_web.config.store import ClusterStore
-from tests.conftest import CertBundle, MemoryKeyring
+from tests.conftest import CertBundle, MemoryKeyring, make_jks
 
 IMAGE = "apache/kafka:3.9.1"
 READY_TIMEOUT_S = 60
@@ -153,14 +161,22 @@ def broker_pem(certs: CertBundle) -> bytes:
     return key + b"".join(chain)
 
 
+class SaslSslBroker(NamedTuple):
+    bootstrap: str  # the SASL_SSL listener, what the app is pointed at
+    plain_bootstrap: str  # the same broker's PLAINTEXT listener, for credential-free test setup
+    certs: CertBundle
+
+
 @pytest.fixture(scope="session")
-def kafka_sasl_ssl(
+def sasl_ssl_broker(
     certs: CertBundle, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[tuple[str, CertBundle]]:
-    """`(bootstrap, certs)` of a broker whose client listener is SASL_SSL with SASL/PLAIN.
+) -> Iterator[SaslSslBroker]:
+    """A broker whose client listener is SASL_SSL with SASL/PLAIN, started once per session.
 
     Users: admin/admin-secret, app/app-secret. The broker certificate (CN/SAN localhost) is
-    signed by `certs.ca_cert`; inter-broker traffic uses an internal PLAINTEXT listener.
+    signed by `certs.ca_cert`; inter-broker traffic uses an internal PLAINTEXT listener, which
+    is also advertised (as `localhost:<plain_port>`) so test setup can reach the broker without
+    credentials.
 
     Two deliberate deviations from the obvious setup, both forced by the image's entrypoint:
     - The SASL_SSL listener is *named* EXTERNAL. The entrypoint greps the advertised listeners
@@ -212,9 +228,75 @@ def kafka_sasl_ssl(
                 "ssl.ca.location": str(ca_file),
             },
         )
-        yield bootstrap, certs
+        yield SaslSslBroker(bootstrap, f"localhost:{plain_port}", certs)
     finally:
         container.stop()
+
+
+@pytest.fixture(scope="session")
+def kafka_sasl_ssl(sasl_ssl_broker: SaslSslBroker) -> tuple[str, CertBundle]:
+    """`(bootstrap, certs)` of the SASL_SSL listener of `sasl_ssl_broker`."""
+    return sasl_ssl_broker.bootstrap, sasl_ssl_broker.certs
+
+
+def plaintext_body(bootstrap: str, name: str = "local") -> dict[str, Any]:
+    """`POST /api/clusters` body for a PLAINTEXT cluster."""
+    return {"name": name, "env": "dev", "bootstrap_servers": bootstrap}
+
+
+def sasl_ssl_body(
+    bootstrap: str,
+    ca_cert: x509.Certificate,
+    *,
+    name: str = "secure",
+    password: str = SASL_USERS["app"],
+) -> dict[str, Any]:
+    """`POST /api/clusters` body for a SASL_SSL + PLAIN cluster (user `app`, JKS truststore)."""
+    return {
+        "name": name,
+        "env": "stg",
+        "bootstrap_servers": bootstrap,
+        "security_protocol": "SASL_SSL",
+        "sasl_mechanism": "PLAIN",
+        "sasl_username": "app",
+        "sasl_password": password,
+        "truststore_base64": base64.b64encode(make_jks([ca_cert], "changeit")).decode(),
+        "truststore_password": "changeit",
+    }
+
+
+@dataclass(frozen=True)
+class Broker:
+    """A broker as a test sees it: how the app registers it and how test setup reaches it."""
+
+    kind: str  # one of BROKER_KINDS
+    cluster_body: dict[str, Any]  # registered through the API, so the app's own config path runs
+    setup_bootstrap: str  # PLAINTEXT listener for creating topics and producing fixtures
+
+    @property
+    def name(self) -> str:
+        return self.cluster_body["name"]
+
+
+BROKER_KINDS = ["plaintext", "sasl_ssl"]
+over_every_broker = pytest.mark.parametrize("broker", BROKER_KINDS, indirect=True)
+
+
+@pytest.fixture
+def broker(request: pytest.FixtureRequest) -> Broker:
+    """The PLAINTEXT broker, or the one `@over_every_broker` picked for this run of the test.
+
+    The SASL_SSL container is requested lazily, so a run that never needs it never starts it.
+    """
+    kind = getattr(request, "param", "plaintext")
+    if kind == "plaintext":
+        bootstrap: str = request.getfixturevalue("kafka_plaintext")
+        return Broker(kind, plaintext_body(bootstrap), bootstrap)
+    if kind == "sasl_ssl":
+        secure: SaslSslBroker = request.getfixturevalue("sasl_ssl_broker")
+        body = sasl_ssl_body(secure.bootstrap, secure.certs.ca_cert)
+        return Broker(kind, body, secure.plain_bootstrap)
+    raise ValueError(f"unknown broker kind {kind!r}, expected one of {BROKER_KINDS}")
 
 
 def _wait_partitions_serving(bootstrap: str, topic: str, partitions: int) -> None:
@@ -239,12 +321,14 @@ def _wait_partitions_serving(bootstrap: str, topic: str, partitions: int) -> Non
 
 
 @pytest.fixture
-def topic_factory(kafka_plaintext: str) -> Iterator[Callable[..., str]]:
-    """`create(partitions=3, config=None) -> name`: unique topics, deleted after the test.
+def topic_factory(broker: Broker) -> Iterator[Callable[..., str]]:
+    """`create(partitions=3, config=None) -> name`: unique topics on `broker`, deleted after the
+    test.
 
     Returns once every partition is serving, so tests never race the leader election.
     """
-    admin = AdminClient({"bootstrap.servers": kafka_plaintext})
+    bootstrap = broker.setup_bootstrap
+    admin = AdminClient({"bootstrap.servers": bootstrap})
     created: list[str] = []
 
     def create(partitions: int = 3, config: dict[str, str] | None = None) -> str:
@@ -252,7 +336,7 @@ def topic_factory(kafka_plaintext: str) -> Iterator[Callable[..., str]]:
         future = admin.create_topics([NewTopic(name, partitions, 1, config=config or {})])[name]
         future.result(timeout=10)
         created.append(name)
-        _wait_partitions_serving(kafka_plaintext, name, partitions)
+        _wait_partitions_serving(bootstrap, name, partitions)
         return name
 
     yield create
@@ -271,3 +355,11 @@ def api(store: ClusterStore) -> Iterator[TestClient]:
     """The real app (real registry, real Kafka clients) over a temp config dir + memory keyring."""
     with TestClient(create_app(store=store), base_url="http://127.0.0.1:8000") as client:
         yield client
+
+
+@pytest.fixture
+def cluster(api: TestClient, broker: Broker) -> str:
+    """Name of `broker`, registered through the API (not connected yet)."""
+    response = api.post("/api/clusters", json=broker.cluster_body)
+    assert response.status_code == 201, response.text
+    return broker.name

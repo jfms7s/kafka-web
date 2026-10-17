@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from testcontainers.core.container import DockerContainer
 
+from tests.integration.conftest import Broker, over_every_broker
+
 pytestmark = pytest.mark.integration
 
 WS = "ws://127.0.0.1:8000"
@@ -20,15 +22,9 @@ BASE_TS = 1_700_000_000_000
 
 
 @pytest.fixture
-def cluster(api: TestClient, kafka_plaintext: str) -> str:
-    body: dict[str, Any] = {"name": "local", "env": "dev", "bootstrap_servers": kafka_plaintext}
-    assert api.post("/api/clusters", json=body).status_code == 201
-    return "local"
-
-
-@pytest.fixture
-def producer(kafka_plaintext: str) -> Producer:
-    return Producer({"bootstrap.servers": kafka_plaintext})
+def producer(broker: Broker) -> Producer:
+    """Produces straight to `broker` over its PLAINTEXT listener (test setup, not the app)."""
+    return Producer({"bootstrap.servers": broker.setup_bootstrap})
 
 
 class Frames:
@@ -108,6 +104,7 @@ def wait_until_live(frames: Frames, producer: Producer, topic: str) -> None:
             return
 
 
+@over_every_broker
 def test_latest_streams_new_messages(
     open_stream: Callable[..., Frames], producer: Producer, topic_factory: Callable[..., str]
 ) -> None:

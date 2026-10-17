@@ -10,14 +10,9 @@ from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient
 from fastapi.testclient import TestClient
 
+from tests.integration.conftest import over_every_broker
+
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def cluster(api: TestClient, kafka_plaintext: str) -> str:
-    body: dict[str, Any] = {"name": "local", "env": "dev", "bootstrap_servers": kafka_plaintext}
-    assert api.post("/api/clusters", json=body).status_code == 201
-    return "local"
 
 
 @pytest.fixture
@@ -42,6 +37,7 @@ def bulk(api: TestClient, cluster: str, topic: str, content: bytes, **fields: st
     )
 
 
+@over_every_broker
 def test_single_publish_round_trips_key_value_and_headers(
     api: TestClient, cluster: str, topic: str
 ) -> None:
