@@ -145,6 +145,10 @@ scripts/check.sh                       # ruff + unit tests (backend), eslint + t
 cd backend && uv run pytest -m integration   # real brokers in containers
 ```
 
+CI (`.github/workflows/ci.yml`) runs both on every push to `main` and every pull request: one job
+runs `scripts/check.sh`, the other the integration suite against the runner's Docker. Locally the
+integration tests need a container engine of your own.
+
 Integration tests start `apache/kafka:3.9.1` containers through Testcontainers and need a container
 engine API. On Fedora with rootless podman, enable the socket once:
 
@@ -152,9 +156,10 @@ engine API. On Fedora with rootless podman, enable the socket once:
 systemctl --user enable --now podman.socket
 ```
 
-The tests default `DOCKER_HOST` to `unix:///run/user/1000/podman/podman.sock` (adjust if your UID is
-not 1000) and disable the Ryuk reaper. Pull the image beforehand (`podman pull apache/kafka:3.9.1`).
-Unit tests need neither Kafka nor a real keyring.
+The tests default `DOCKER_HOST` to your user's rootless podman socket,
+`unix:///run/user/<your UID>/podman/podman.sock` (set `DOCKER_HOST` to use another engine), and
+disable the Ryuk reaper. Pull the image beforehand (`podman pull apache/kafka:3.9.1`). Unit tests
+need neither Kafka nor a real keyring.
 
 ## Layout
 
