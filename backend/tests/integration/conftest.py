@@ -11,8 +11,11 @@ A test that should hold for both security setups takes the `broker` fixture thro
 
 import os
 
-# Must be set before testcontainers is imported (it reads them at import time).
-os.environ.setdefault("DOCKER_HOST", "unix:///run/user/1000/podman/podman.sock")
+from tests.integration.engine import default_docker_host
+
+# Must be set before testcontainers is imported (it reads them at import time). CI points
+# DOCKER_HOST at the runner's Docker socket; locally it defaults to the user's rootless podman.
+os.environ.setdefault("DOCKER_HOST", default_docker_host())
 os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 
 import base64
