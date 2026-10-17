@@ -12,7 +12,14 @@ from confluent_kafka import KafkaError, KafkaException
 from kafka_web.config.models import ClusterInput
 from kafka_web.config.secrets import SecretStore
 from kafka_web.config.store import ClusterStore
-from kafka_web.errors import BrokerError, Conflict, KafkaTimeout, NotFound, Unauthorized
+from kafka_web.errors import (
+    BrokerError,
+    Conflict,
+    KafkaTimeout,
+    NotFound,
+    Unauthorized,
+    ValidationFailed,
+)
 from kafka_web.kafka.registry import ClusterConnection, ConnectionRegistry, check_connectivity
 from tests.conftest import CertBundle, MemoryKeyring, make_jks
 from tests.fakes import FakeAdmin, Fakes
@@ -469,7 +476,7 @@ def test_test_with_existing_falls_back_to_stored_secret_and_truststore(
     assert store.truststore_path(existing).exists()  # the stored PEM is not a temp file
 
 
-def test_test_with_existing_but_missing_secret_is_a_conflict(
+def test_test_with_existing_but_missing_secret_asks_for_the_password(
     store: ClusterStore,
     registry: ConnectionRegistry,
     fakes: Fakes,
@@ -480,22 +487,22 @@ def test_test_with_existing_but_missing_secret_is_a_conflict(
     memory_keyring.data.clear()
     edited = sasl_ssl(certs, sasl_password=None)
 
-    with pytest.raises(Conflict) as info:
+    with pytest.raises(ValidationFailed) as info:
         registry.test(edited, existing)
-    assert info.value.code == "cluster_unusable"
+    assert (info.value.code, info.value.field) == ("sasl_password_required", "sasl_password")
     assert fakes.admins == []
 
 
-def test_test_with_existing_but_missing_truststore_is_a_conflict(
+def test_test_with_existing_but_missing_truststore_asks_for_one(
     store: ClusterStore, registry: ConnectionRegistry, fakes: Fakes, certs: CertBundle
 ):
     existing = store.create(sasl_ssl(certs))
     store.truststore_path(existing).unlink()
     edited = sasl_ssl(certs, truststore_base64=None, truststore_password=None)
 
-    with pytest.raises(Conflict) as info:
+    with pytest.raises(ValidationFailed) as info:
         registry.test(edited, existing)
-    assert info.value.code == "cluster_unusable"
+    assert (info.value.code, info.value.field) == ("truststore_required", "truststore")
     assert fakes.admins == []
 
 

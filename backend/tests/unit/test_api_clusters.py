@@ -249,6 +249,32 @@ def test_update_keeps_blank_secrets(client: TestClient, jks_b64: str, memory_key
     assert_no_secrets(response.text, jks_b64)
 
 
+def test_update_with_a_wiped_secret_and_blank_password_is_422(
+    client: TestClient, jks_b64: str, memory_keyring: MemoryKeyring, tmp_path: Path
+):
+    client.post("/api/clusters", json=sasl_ssl_body(jks_b64))
+    memory_keyring.data.clear()
+    yaml_before = (tmp_path / "cfg" / "clusters.yaml").read_text()
+
+    edited = sasl_ssl_body(jks_b64, env="stg2", sasl_password="", truststore_base64="")
+    response = client.put("/api/clusters/stg-eu", json=edited)
+
+    assert_error(response, 422, "sasl_password_required", "sasl_password")
+    assert (tmp_path / "cfg" / "clusters.yaml").read_text() == yaml_before
+
+
+def test_update_with_a_missing_truststore_and_no_upload_is_422(
+    client: TestClient, jks_b64: str, tmp_path: Path
+):
+    client.post("/api/clusters", json=sasl_ssl_body(jks_b64))
+    (tmp_path / "cfg" / "truststores" / "stg-eu.pem").unlink()
+
+    edited = sasl_ssl_body(jks_b64, env="stg2", truststore_base64="", truststore_password=None)
+    response = client.put("/api/clusters/stg-eu", json=edited)
+
+    assert_error(response, 422, "truststore_required", "truststore")
+
+
 def test_update_unknown_is_404(client: TestClient):
     assert_error(
         client.put("/api/clusters/nope", json=plaintext_body("nope")), 404, "cluster_not_found"

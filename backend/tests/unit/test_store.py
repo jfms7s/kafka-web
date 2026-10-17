@@ -583,6 +583,30 @@ def test_materialize_reuses_the_password_for_the_same_target(
     assert password is None  # None = keep the stored secret
 
 
+def test_materialize_blank_password_needs_one_when_the_saved_secret_is_gone(
+    store: ClusterStore, certs: CertBundle, memory_keyring: MemoryKeyring
+):
+    existing = store.create(sasl_ssl(certs))
+    memory_keyring.data.clear()
+    with pytest.raises(ValidationFailed) as exc:
+        store.materialize(sasl_ssl(certs, sasl_password=None), existing=existing)
+    assert (exc.value.code, exc.value.field) == ("sasl_password_required", "sasl_password")
+
+
+@pytest.mark.parametrize("damage", ["delete", "empty"])
+def test_materialize_no_upload_needs_one_when_the_saved_truststore_is_gone(
+    store: ClusterStore, certs: CertBundle, damage: str
+):
+    existing = store.create(sasl_ssl(certs))
+    pem = store.truststore_path(existing)
+    pem.unlink() if damage == "delete" else pem.write_text("")
+    with pytest.raises(ValidationFailed) as exc:
+        store.materialize(
+            sasl_ssl(certs, truststore_base64=None, truststore_password=None), existing=existing
+        )
+    assert (exc.value.code, exc.value.field) == ("truststore_required", "truststore")
+
+
 def test_materialize_plaintext_returns_no_secrets(store: ClusterStore):
     cfg, pem, password = store.materialize(plaintext(sasl_password="x"), existing=None)
     assert (pem, password) == (None, None)

@@ -155,7 +155,12 @@ class ClusterStore:
             if b64:
                 pem = truststore_b64_to_pem(b64, _secret_value(inp.truststore_password))
                 truststore = self._pem_relpath(inp.name)
-            elif existing is not None and existing.uses_tls and existing.truststore:
+            elif (
+                existing is not None
+                and existing.uses_tls
+                and existing.truststore
+                and self.truststore_summary(existing) is not None
+            ):
                 truststore = existing.truststore
             else:
                 raise ValidationFailed(
@@ -170,6 +175,14 @@ class ClusterStore:
             if password is None and not (existing is not None and existing.uses_sasl):
                 raise ValidationFailed(
                     "sasl_password: required for SASL protocols",
+                    code="sasl_password_required",
+                    field="sasl_password",
+                )
+            if password is None and self.sasl_password(existing) is None:
+                # "Keep the saved password" only works if there is one; KeyringUnavailable
+                # propagates as its own 500.
+                raise ValidationFailed(
+                    "sasl_password: no saved password to keep; enter it again",
                     code="sasl_password_required",
                     field="sasl_password",
                 )
