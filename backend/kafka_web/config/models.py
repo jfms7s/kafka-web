@@ -36,6 +36,30 @@ _FORBIDDEN_EXTRA_STARTS = FORBIDDEN_EXTRA_PREFIXES[2:]
 _SECRET_EXTRA_EXACT = ("ssl.key.pem", "ssl.keystore.key")
 _SECRET_EXTRA_WORDS = ("password", "secret")
 
+# Properties that make librdkafka load native code (a plugin, an OpenSSL engine or provider) or
+# that confluent-kafka treats as Python callbacks/objects. Matched case-insensitively.
+_CODE_EXTRA_EXACT = (
+    "plugin.library.paths",
+    "ssl.providers",
+    "on_delivery",
+    "on_commit",
+    "logger",
+    "opaque",
+)
+_CODE_EXTRA_STARTS = ("ssl.engine.",)
+_CODE_EXTRA_ENDS = ("_cb",)
+
+
+def loads_code(key: str) -> bool:
+    """Whether an `extra` key could load native code or set a client callback."""
+    lowered = key.lower()
+    return (
+        lowered in _CODE_EXTRA_EXACT
+        or lowered.startswith(_CODE_EXTRA_STARTS)
+        or lowered.endswith(_CODE_EXTRA_ENDS)
+    )
+
+
 _NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
@@ -86,6 +110,12 @@ class ClusterBase(BaseModel):
                 raise ValidationFailed(
                     f"extra: property {key!r}: secrets cannot be stored in extra "
                     "(clusters.yaml holds no secrets)",
+                    field="extra",
+                )
+            if loads_code(key):
+                raise ValidationFailed(
+                    f"extra: property {key!r} can load native code or set a callback "
+                    "and is not allowed",
                     field="extra",
                 )
             if key in _FORBIDDEN_EXTRA_EXACT or key.startswith(_FORBIDDEN_EXTRA_STARTS):

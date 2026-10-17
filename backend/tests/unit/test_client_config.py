@@ -90,3 +90,20 @@ def test_tls_without_ca_location_is_a_programming_error():
 def test_sasl_without_password_is_a_programming_error():
     with pytest.raises(ValueError, match="sasl_password"):
         build_client_config(sasl_ssl(), sasl_password=None, ca_location=Path("/x.pem"))
+
+
+def test_build_refuses_code_loading_extra_that_skipped_validation():
+    cfg = ClusterConfig.model_construct(
+        name="dev",
+        env="dev",
+        region=None,
+        bootstrap_servers="b:1",
+        security_protocol="PLAINTEXT",
+        sasl_mechanism=None,
+        sasl_username=None,
+        read_only=False,
+        extra={"plugin.library.paths": "/tmp/x.so"},
+        truststore=None,
+    )
+    with pytest.raises(ValueError, match=r"plugin\.library\.paths"):
+        build_client_config(cfg, sasl_password=None, ca_location=None)

@@ -58,7 +58,9 @@ A cluster has a lowercase name (`^[a-z0-9][a-z0-9-]{0,62}$`, immutable), an `env
 `prd`, ...), optional `region`, `bootstrap_servers`, `security_protocol`
 (`PLAINTEXT` | `SSL` | `SASL_PLAINTEXT` | `SASL_SSL`), `sasl_mechanism` (`PLAIN` | `SCRAM-SHA-256` |
 `SCRAM-SHA-512`), `sasl_username`, `read_only`, and optional raw librdkafka properties in `extra`
-(keys owned by the typed fields, such as `bootstrap.servers` or `sasl.*`, are rejected).
+(keys owned by the typed fields, such as `bootstrap.servers` or `sasl.*`, are rejected, as are
+properties that load native code or set callbacks: `plugin.library.paths`, `ssl.engine.*`,
+`ssl.providers`, `*_cb`, `on_delivery`, `on_commit`, `logger`, `opaque`).
 Deleting a cluster removes its YAML entry, keyring secret and PEM file and closes its connection and
 streams.
 

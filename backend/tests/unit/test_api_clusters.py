@@ -388,6 +388,31 @@ def test_test_connection_failure(client: TestClient, fakes: Fakes):
     assert_error(response, 502, "broker_unreachable")
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "plugin.library.paths",
+        "Plugin.Library.Paths",
+        "ssl.engine.location",
+        "ssl.engine.id",
+        "ssl.providers",
+        "stats_cb",
+        "oauth_cb",
+        "on_delivery",
+        "logger",
+        "opaque",
+    ],
+)
+@pytest.mark.parametrize("path", ["/api/clusters/test", "/api/clusters"])
+def test_extra_that_loads_native_code_is_422_and_builds_no_client(
+    client: TestClient, fakes: Fakes, path: str, key: str
+):
+    response = client.post(path, json=plaintext_body(extra={key: "/tmp/x.so"}))
+
+    assert_error(response, 422, "validation_failed", "extra")
+    assert fakes.admins == []
+
+
 def test_test_connection_validates_input(client: TestClient, jks_b64: str):
     body = sasl_ssl_body(jks_b64, sasl_password=None)
     response = client.post("/api/clusters/test", json=body)
