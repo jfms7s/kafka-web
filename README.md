@@ -42,6 +42,8 @@ The server binds `127.0.0.1` only. Open <http://127.0.0.1:8000> (prod) or <http:
 - Secrets (SASL password) live **only** in the OS keyring (service `kafka-web`, user
   `<cluster>:sasl_password`). There is no plaintext fallback: without a usable keyring, saving a
   cluster with a password fails with a clear error. No endpoint returns a secret and none is logged.
+  A saved password is reused only for the same bootstrap servers, security protocol and SASL
+  mechanism; changing any of them on the edit form requires entering the password again.
 - Truststore passwords are used once for conversion and never stored.
 - TLS certificate and hostname verification cannot be turned off: for `SSL` and `SASL_SSL` clusters
   every client runs with `enable.ssl.certificate.verification=true` and

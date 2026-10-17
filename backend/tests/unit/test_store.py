@@ -547,6 +547,42 @@ def test_materialize_keeps_existing_truststore_and_secret(store: ClusterStore, c
     assert password is None
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"bootstrap_servers": "evil:9094"},
+        {"security_protocol": "SASL_PLAINTEXT", "truststore_base64": None},
+        {"sasl_mechanism": "PLAIN"},
+    ],
+)
+def test_materialize_needs_the_password_again_when_the_target_changes(
+    store: ClusterStore, certs: CertBundle, change: dict
+):
+    existing = store.create(sasl_ssl(certs))
+    edited = sasl_ssl(certs, **{"sasl_password": None, "truststore_base64": None, **change})
+    with pytest.raises(ValidationFailed) as exc:
+        store.materialize(edited, existing=existing)
+    assert exc.value.code == "sasl_password_required"
+    assert exc.value.field == "sasl_password"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {},
+        {"bootstrap_servers": " b1:9094 ,  b2:9094 "},
+        {"sasl_username": "someone-else", "env": "stg2", "read_only": True},
+    ],
+)
+def test_materialize_reuses_the_password_for_the_same_target(
+    store: ClusterStore, certs: CertBundle, change: dict
+):
+    existing = store.create(sasl_ssl(certs))
+    edited = sasl_ssl(certs, **{"sasl_password": None, "truststore_base64": None, **change})
+    _cfg, _pem, password = store.materialize(edited, existing=existing)
+    assert password is None  # None = keep the stored secret
+
+
 def test_materialize_plaintext_returns_no_secrets(store: ClusterStore):
     cfg, pem, password = store.materialize(plaintext(sasl_password="x"), existing=None)
     assert (pem, password) == (None, None)

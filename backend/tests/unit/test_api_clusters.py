@@ -445,6 +445,41 @@ def test_test_connection_with_existing_uses_stored_secrets(
     assert admin.conf["sasl.password"] == SASL_SECRET
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"bootstrap_servers": "evil:9094"},
+        {"security_protocol": "SASL_PLAINTEXT"},
+        {"sasl_mechanism": "PLAIN"},
+    ],
+)
+def test_test_connection_with_existing_refuses_stored_password_for_a_new_target(
+    client: TestClient, fakes: Fakes, jks_b64: str, change: dict
+):
+    client.post("/api/clusters", json=sasl_ssl_body(jks_b64))
+    edited = sasl_ssl_body(jks_b64, sasl_password="", truststore_base64="", **change)
+    response = client.post("/api/clusters/test", params={"existing": "stg-eu"}, json=edited)
+    assert_error(response, 422, "sasl_password_required", "sasl_password")
+    assert fakes.admins == []
+
+
+def test_update_to_a_new_bootstrap_needs_the_password_and_changes_nothing(
+    client: TestClient, jks_b64: str, memory_keyring: MemoryKeyring, tmp_path: Path
+):
+    client.post("/api/clusters", json=sasl_ssl_body(jks_b64))
+    yaml_before = (tmp_path / "cfg" / "clusters.yaml").read_text()
+    keyring_before = dict(memory_keyring.data)
+
+    edited = sasl_ssl_body(
+        jks_b64, bootstrap_servers="evil:9094", sasl_password="", truststore_base64=""
+    )
+    response = client.put("/api/clusters/stg-eu", json=edited)
+
+    assert_error(response, 422, "sasl_password_required", "sasl_password")
+    assert (tmp_path / "cfg" / "clusters.yaml").read_text() == yaml_before
+    assert memory_keyring.data == keyring_before
+
+
 def test_test_connection_with_unknown_existing_is_404(client: TestClient):
     response = client.post("/api/clusters/test", params={"existing": "nope"}, json=plaintext_body())
     assert_error(response, 404, "cluster_not_found")
