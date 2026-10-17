@@ -378,6 +378,27 @@ def test_client_config_does_not_open_a_connection(
     assert not registry.is_connected("stg")
 
 
+def test_client_config_forces_tls_verification_on_a_hand_edited_entry(
+    store: ClusterStore, registry: ConnectionRegistry, tmp_path: Path, certs: CertBundle
+):
+    store.create(sasl_ssl(certs))
+    yaml_path = tmp_path / "cfg" / "clusters.yaml"
+    text = yaml_path.read_text()
+    assert "extra: {}" in text
+    yaml_path.write_text(
+        text.replace(
+            "extra: {}",
+            "extra: {enable.ssl.certificate.verification: 'false', "
+            "ssl.endpoint.identification.algorithm: none}",
+        )
+    )
+
+    conf = registry.client_config("stg")
+
+    assert conf["enable.ssl.certificate.verification"] == "true"
+    assert conf["ssl.endpoint.identification.algorithm"] == "https"
+
+
 def test_client_config_of_unusable_cluster_is_a_conflict(
     store: ClusterStore, registry: ConnectionRegistry, memory_keyring: MemoryKeyring, certs
 ):

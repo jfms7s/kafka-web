@@ -43,6 +43,10 @@ The server binds `127.0.0.1` only. Open <http://127.0.0.1:8000> (prod) or <http:
   `<cluster>:sasl_password`). There is no plaintext fallback: without a usable keyring, saving a
   cluster with a password fails with a clear error. No endpoint returns a secret and none is logged.
 - Truststore passwords are used once for conversion and never stored.
+- TLS certificate and hostname verification cannot be turned off: for `SSL` and `SASL_SSL` clusters
+  every client runs with `enable.ssl.certificate.verification=true` and
+  `ssl.endpoint.identification.algorithm=https`, whatever `extra` says. The API rejects either key
+  in `extra`; an older `clusters.yaml` entry that sets one still loads, and the forced value wins.
 
 ## Configuration
 

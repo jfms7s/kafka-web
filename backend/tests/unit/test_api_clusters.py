@@ -413,6 +413,21 @@ def test_extra_that_loads_native_code_is_422_and_builds_no_client(
     assert fakes.admins == []
 
 
+@pytest.mark.parametrize(
+    "key", ["enable.ssl.certificate.verification", "ssl.endpoint.identification.algorithm"]
+)
+def test_create_and_update_refuse_tls_verification_opt_outs(client: TestClient, key: str):
+    created = client.post("/api/clusters", json=plaintext_body())
+    assert created.status_code == 201, created.text
+
+    for response in (
+        client.post("/api/clusters", json=plaintext_body("other", extra={key: "none"})),
+        client.put("/api/clusters/dev", json=plaintext_body(extra={key: "none"})),
+    ):
+        body = assert_error(response, 422, "validation_failed", "extra")
+        assert "TLS" in body["message"]
+
+
 def test_test_connection_validates_input(client: TestClient, jks_b64: str):
     body = sasl_ssl_body(jks_b64, sasl_password=None)
     response = client.post("/api/clusters/test", json=body)

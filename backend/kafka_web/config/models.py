@@ -166,9 +166,29 @@ class ClusterConfig(ClusterBase):
         return self
 
 
+# TLS verification switches. build_client_config forces them on for TLS clusters. New input may
+# not set them; an old clusters.yaml entry that does still loads, and the forced value wins.
+_TLS_VERIFICATION_EXTRA = (
+    "enable.ssl.certificate.verification",
+    "ssl.endpoint.identification.algorithm",
+)
+
+
 class ClusterInput(ClusterBase):
     """API create/update body; carries write-only secrets that are never persisted in YAML."""
 
     sasl_password: SecretStr | None = None
     truststore_base64: str | None = Field(default=None, repr=False)
     truststore_password: SecretStr | None = None
+
+    @field_validator("extra")
+    @classmethod
+    def _extra_must_not_touch_tls_verification(cls, extra: dict[str, str]) -> dict[str, str]:
+        for key in extra:
+            if key.lower() in _TLS_VERIFICATION_EXTRA:
+                raise ValidationFailed(
+                    f"extra: property {key!r}: TLS certificate and hostname verification "
+                    "cannot be disabled",
+                    field="extra",
+                )
+        return extra

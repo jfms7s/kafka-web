@@ -41,6 +41,7 @@ def test_sasl_ssl_includes_sasl_and_tls_settings():
         "sasl.password": "pw",
         "ssl.ca.location": "/cfg/truststores/a.pem",
         "ssl.endpoint.identification.algorithm": "https",
+        "enable.ssl.certificate.verification": "true",
         "client.id": "kafka-web",
     }
 
@@ -107,3 +108,27 @@ def test_build_refuses_code_loading_extra_that_skipped_validation():
     )
     with pytest.raises(ValueError, match=r"plugin\.library\.paths"):
         build_client_config(cfg, sasl_password=None, ca_location=None)
+
+
+TLS_OPT_OUT = {
+    "enable.ssl.certificate.verification": "false",
+    "ssl.endpoint.identification.algorithm": "none",
+}
+
+
+@pytest.mark.parametrize("protocol", ["SSL", "SASL_SSL"])
+def test_tls_verification_cannot_be_turned_off_through_extra(protocol):
+    sasl = {"sasl_mechanism": "PLAIN", "sasl_username": "u"} if protocol == "SASL_SSL" else {}
+    conf = build_client_config(
+        cfg(security_protocol=protocol, truststore="truststores/a.pem", extra=TLS_OPT_OUT, **sasl),
+        sasl_password="pw" if sasl else None,
+        ca_location=Path("/x.pem"),
+    )
+    assert conf["enable.ssl.certificate.verification"] == "true"
+    assert conf["ssl.endpoint.identification.algorithm"] == "https"
+
+
+def test_plaintext_gets_no_tls_verification_keys():
+    conf = build_client_config(cfg(), sasl_password=None, ca_location=None)
+    assert "enable.ssl.certificate.verification" not in conf
+    assert "ssl.endpoint.identification.algorithm" not in conf
