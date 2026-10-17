@@ -1,6 +1,5 @@
 """Cluster API against real brokers: PLAINTEXT, SASL_SSL (JKS truststore), failure modes."""
 
-import base64
 import datetime as dt
 import time
 from collections.abc import Callable
@@ -15,35 +14,12 @@ from cryptography.x509.oid import NameOID
 from fastapi.testclient import TestClient
 
 from kafka_web.config.store import ClusterStore
-from tests.conftest import CertBundle, make_jks
+from tests.conftest import CertBundle
+from tests.integration.conftest import plaintext_body, sasl_ssl_body
 
 pytestmark = pytest.mark.integration
 
 MAX_FAILURE_S = 15  # Review Focus 1: a dead or wrong broker answers within ~12 s, never hangs
-
-
-def plaintext_body(bootstrap: str, name: str = "local") -> dict[str, Any]:
-    return {"name": name, "env": "dev", "bootstrap_servers": bootstrap}
-
-
-def sasl_ssl_body(
-    bootstrap: str,
-    ca_cert: x509.Certificate,
-    *,
-    name: str = "secure",
-    password: str = "app-secret",
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "env": "stg",
-        "bootstrap_servers": bootstrap,
-        "security_protocol": "SASL_SSL",
-        "sasl_mechanism": "PLAIN",
-        "sasl_username": "app",
-        "sasl_password": password,
-        "truststore_base64": base64.b64encode(make_jks([ca_cert], "changeit")).decode(),
-        "truststore_password": "changeit",
-    }
 
 
 def other_ca() -> x509.Certificate:

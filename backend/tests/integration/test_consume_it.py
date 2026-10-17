@@ -9,6 +9,8 @@ from confluent_kafka import Producer
 from confluent_kafka.admin import AdminClient
 from fastapi.testclient import TestClient
 
+from tests.integration.conftest import Broker, over_every_broker
+
 pytestmark = pytest.mark.integration
 
 BASE_TS = 1_700_000_000_000
@@ -16,20 +18,13 @@ BINARY = b"\xff\xfe\x00\x01"
 
 
 @pytest.fixture
-def cluster(api: TestClient, kafka_plaintext: str) -> str:
-    body: dict[str, Any] = {"name": "local", "env": "dev", "bootstrap_servers": kafka_plaintext}
-    assert api.post("/api/clusters", json=body).status_code == 201
-    return "local"
-
-
-@pytest.fixture
-def filled_topic(kafka_plaintext: str, topic_factory: Callable[..., str]) -> str:
+def filled_topic(broker: Broker, topic_factory: Callable[..., str]) -> str:
     """30 messages over 3 partitions: key k<i> on partition i % 3, timestamp BASE_TS + i s.
 
     Even i carry a JSON value, odd i a binary one; every message has a text and a binary header.
     """
     topic = topic_factory(partitions=3)
-    producer = Producer({"bootstrap.servers": kafka_plaintext})
+    producer = Producer({"bootstrap.servers": broker.setup_bootstrap})
     for i in range(30):
         value = f'{{"n": {i}}}'.encode() if i % 2 == 0 else BINARY
         producer.produce(
@@ -54,6 +49,7 @@ def keys(messages: list[dict[str, Any]]) -> list[str]:
     return [m["key"]["data"] for m in messages]
 
 
+@over_every_broker
 def test_earliest_returns_everything_and_stops_early(
     api: TestClient, cluster: str, filled_topic: str
 ) -> None:

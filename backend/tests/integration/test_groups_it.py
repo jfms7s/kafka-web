@@ -23,13 +23,6 @@ STABLE_TIMEOUT_S = 45
 
 
 @pytest.fixture
-def cluster(api: TestClient, kafka_plaintext: str) -> str:
-    body: dict[str, Any] = {"name": "local", "env": "dev", "bootstrap_servers": kafka_plaintext}
-    assert api.post("/api/clusters", json=body).status_code == 201
-    return "local"
-
-
-@pytest.fixture
 def topic(topic_factory: Callable[..., str], kafka_plaintext: str) -> str:
     """A single-partition topic holding `MESSAGES` messages one second apart."""
     name = topic_factory(partitions=1)
