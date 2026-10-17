@@ -7,7 +7,6 @@ commits and never joins a group, so browsing leaves no consumer group behind.
 import contextlib
 import logging
 import time
-import uuid
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -15,6 +14,7 @@ from confluent_kafka import Consumer, KafkaError, TopicPartition
 from pydantic import BaseModel, Field
 
 from kafka_web.errors import KafkaTimeout, NotFound, ValidationFailed
+from kafka_web.kafka.client_config import consumer_config
 from kafka_web.kafka.errors import call_with_timeout, map_kafka_exception
 from kafka_web.services.decode import MessageView, to_message_view
 from kafka_web.services.offsets import StartMode, end_offsets, is_done, plan_start_offsets
@@ -79,17 +79,6 @@ class Budget:
         if remaining <= 0:
             raise KafkaTimeout("Kafka did not answer the setup calls in time")
         return min(CALL_TIMEOUT_S, remaining)
-
-
-def consumer_config(client_config: dict[str, str]) -> dict[str, Any]:
-    return {
-        **client_config,
-        "group.id": f"kafka-web-{uuid.uuid4()}",
-        "enable.auto.commit": "false",
-        "enable.partition.eof": "true",
-        "auto.offset.reset": "earliest",
-        "allow.auto.create.topics": "false",
-    }
 
 
 def partition_ids(consumer: Consumer, topic: str, wanted: int | None, budget: Budget) -> list[int]:
@@ -184,7 +173,8 @@ def consume_snapshot(
     clock: Callable[[], float] = time.monotonic,
 ) -> list[MessageView]:
     validate_start(params)
-    consumer = call_with_timeout(lambda: consumer_factory(consumer_config(client_config)))
+    conf = consumer_config(client_config, partition_eof=True)
+    consumer = call_with_timeout(lambda: consumer_factory(conf))
     try:
         return _snapshot(consumer, topic, params, clock)
     finally:
