@@ -10,5 +10,5 @@ if [ -n "${COVERAGE_DIR:-}" ]; then
   ts_cov=(-- --coverage.enabled --coverage.provider=v8 --coverage.reporter=lcovonly
     "--coverage.reportsDirectory=$COVERAGE_DIR/ts" '--coverage.include=src/**')
 fi
-(cd "$root/backend" && uv run ruff check . && uv run ruff format --check . && uv run pytest -q "${py_cov[@]}")
-(cd "$root/frontend" && npm run lint && npm run typecheck && npm test "${ts_cov[@]}")
+(cd "$root/backend" && uv run ruff check . && uv run ruff format --check . && uv run pytest -q ${py_cov[@]+"${py_cov[@]}"})
+(cd "$root/frontend" && npm run lint && npm run typecheck && npm test ${ts_cov[@]+"${ts_cov[@]}"})
