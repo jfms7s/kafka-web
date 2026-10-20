@@ -41,7 +41,24 @@ jobs:
         working-directory: frontend
         run: npm ci
       - name: Run scripts/check.sh
+        env:
+          # Makes check.sh also write the unit-test lcov fragments here (integration stays out).
+          COVERAGE_DIR: ${{ runner.temp }}/coverage
         run: scripts/check.sh
+      # Runs only after check.sh succeeded; relative SF paths get the package directory prefixed.
+      - name: Collect coverage fragments (eng-metrics-lab)
+        run: |
+          sed 's|^SF:\([^/]\)|SF:backend/\1|' "$RUNNER_TEMP/coverage/py.lcov" > "$RUNNER_TEMP/coverage-py.lcov"
+          sed 's|^SF:\([^/]\)|SF:frontend/\1|' "$RUNNER_TEMP/coverage/ts/lcov.info" > "$RUNNER_TEMP/coverage-ts.lcov"
+          mkdir -p .quality
+          mv "$RUNNER_TEMP/coverage-py.lcov" "$RUNNER_TEMP/coverage-ts.lcov" .quality/
+        continue-on-error: true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-fragments
+          path: .quality
+          include-hidden-files: true
+          retention-days: 7
 
   integration:
     name: Integration tests (Kafka in Docker)
@@ -69,6 +86,8 @@ jobs:
   # Report-only: never gates the build; fragments feed the quality-report image.
   quality:
     name: Code quality (report-only, eng-metrics-lab)
+    needs: [check]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -90,6 +109,11 @@ jobs:
         run: |
           mkdir -p .quality
           cd frontend && npx --yes knip@5.88.1 --reporter json --no-exit-code > ../.quality/deadcode-ts.json
+        continue-on-error: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-fragments
+          path: .quality
         continue-on-error: true
       - name: Code quality (report-only)
         uses: jfms7s/eng-metrics-lab/action@v0
