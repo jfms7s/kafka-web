@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from 'vitest'
 import { mockVirtualLayout } from '../test/layout'
 import { LiveTab } from './LiveTab'
 
@@ -122,13 +122,13 @@ const startButton = () => screen.getByRole('button', { name: 'Start' })
 const stopButton = () => screen.getByRole('button', { name: 'Stop' })
 
 // jsdom implements no Element.scrollTo; the virtualizer scrolls through it when it exists.
-let scrollTo: ReturnType<typeof vi.fn>
+let scrollTo: Mock<(options?: ScrollToOptions) => void>
 
 beforeEach(() => {
   MockWebSocket.instances = []
   vi.stubGlobal('WebSocket', MockWebSocket)
-  scrollTo = vi.fn()
-  HTMLElement.prototype.scrollTo = scrollTo
+  scrollTo = vi.fn<(options?: ScrollToOptions) => void>()
+  HTMLElement.prototype.scrollTo = scrollTo as HTMLElement['scrollTo']
 })
 afterEach(() => {
   vi.unstubAllGlobals()
