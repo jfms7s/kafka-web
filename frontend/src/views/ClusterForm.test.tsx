@@ -108,12 +108,31 @@ describe('ClusterForm field visibility', () => {
 })
 
 describe('ClusterForm create', () => {
-  it('checks read-only when the env is typed as prd', async () => {
+  it.each(['prd', 'PRD', 'prod', 'Production'])(
+    'checks read-only when the env is typed as %s',
+    async (env) => {
+      const user = renderForm()
+      const readOnly = screen.getByLabelText('Read-only')
+      expect(readOnly).not.toBeChecked()
+      await user.type(screen.getByLabelText('Environment'), env)
+      expect(readOnly).toBeChecked()
+    },
+  )
+
+  it('leaves read-only alone for other envs', async () => {
     const user = renderForm()
-    const readOnly = screen.getByLabelText('Read-only')
-    expect(readOnly).not.toBeChecked()
-    await user.type(screen.getByLabelText('Environment'), 'prd')
-    expect(readOnly).toBeChecked()
+    await user.type(screen.getByLabelText('Environment'), 'preprod')
+    expect(screen.getByLabelText('Read-only')).not.toBeChecked()
+  })
+
+  it('does not re-check read-only once the user unchecked it', async () => {
+    const user = renderForm()
+    const env = screen.getByLabelText('Environment')
+    await user.type(env, 'prd')
+    await user.click(screen.getByLabelText('Read-only'))
+    await user.clear(env)
+    await user.type(env, 'prod')
+    expect(screen.getByLabelText('Read-only')).not.toBeChecked()
   })
 
   it('posts only ClusterInput fields', async () => {
@@ -264,12 +283,24 @@ describe('ClusterForm edit', () => {
     })
   })
 
-  it('does not auto-check read-only when the env is edited to prd', async () => {
+  it('checks read-only when the env is edited to prod', async () => {
     const user = renderForm('/clusters/stg-eu/edit')
     const env = await screen.findByLabelText('Environment')
+    expect(screen.getByLabelText('Read-only')).not.toBeChecked()
+    await user.clear(env)
+    await user.type(env, 'prod')
+    expect(screen.getByLabelText('Read-only')).toBeChecked()
+  })
+
+  it('does not auto-check read-only on edit once the user touched it', async () => {
+    const user = renderForm('/clusters/stg-eu/edit')
+    const env = await screen.findByLabelText('Environment')
+    const readOnly = screen.getByLabelText('Read-only')
+    await user.click(readOnly)
+    await user.click(readOnly)
     await user.clear(env)
     await user.type(env, 'prd')
-    expect(screen.getByLabelText('Read-only')).not.toBeChecked()
+    expect(readOnly).not.toBeChecked()
   })
 })
 

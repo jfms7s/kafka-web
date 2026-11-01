@@ -82,8 +82,12 @@ from the keyring, is shown as *unusable* with the reason.
 
 ### Write protection
 
-- A cluster with `read_only: true` (the default in the form for `env: prd`) rejects every write with
-  `403 read_only_cluster`: publish (single and bulk), reset offsets, create group, delete group.
+- A cluster with `read_only: true` rejects every write with `403 read_only_cluster`: publish
+  (single and bulk), reset offsets, create group, delete group.
+- `read_only` defaults to `true` when `env` is a production env (`prd`, `prod` or `production`, any
+  case) and to `false` otherwise, wherever the cluster comes from: the form, `POST`/`PUT
+  /api/clusters` without `read_only`, or a hand-written `clusters.yaml` entry without it. An explicit
+  `read_only: false` still wins. Saving writes the resolved value to `clusters.yaml`.
 - Otherwise the destructive actions need a **typed confirmation** (the UI asks you to type the name;
   the API field is `confirm`): reset offsets and delete group take the group id, bulk publish takes the
   topic name. A mismatch is `422 confirmation_mismatch`.

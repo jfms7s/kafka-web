@@ -60,6 +60,15 @@ def loads_code(key: str) -> bool:
     )
 
 
+# Env names that make a cluster read-only unless its `read_only` is set explicitly. Compared
+# after stripping, case-insensitively.
+PRODUCTION_ENVS = frozenset({"prd", "prod", "production"})
+
+
+def is_production_env(env: str) -> bool:
+    return env.strip().lower() in PRODUCTION_ENVS
+
+
 _NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
@@ -88,8 +97,18 @@ class ClusterBase(BaseModel):
     security_protocol: SecurityProtocol = "PLAINTEXT"
     sasl_mechanism: SaslMechanism | None = None
     sasl_username: str | None = None
+    # Omitted (or null) means "decide from env": read-only for a production env, else writable.
+    # An explicit value always wins. Resolved here so the API and clusters.yaml agree.
     read_only: bool = False
     extra: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_only_defaults_from_env(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("read_only") is None:
+            env = data.get("env")
+            return {**data, "read_only": isinstance(env, str) and is_production_env(env)}
+        return data
 
     @model_validator(mode="wrap")
     @classmethod

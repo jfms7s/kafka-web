@@ -167,6 +167,30 @@ def test_list_hand_written_minimal_entry(store: ClusterStore, root: Path):
     assert cfg == ClusterConfig(name="dev", env="dev", bootstrap_servers="b:1")
 
 
+@pytest.mark.parametrize("env", ["prd", "PRD", "prod", "production"])
+def test_list_production_entry_without_read_only_loads_read_only(
+    store: ClusterStore, root: Path, env: str
+):
+    write_yaml(root, f"clusters:\n  - {{name: p, env: {env}, bootstrap_servers: 'b:1'}}\n")
+    [cfg] = store.list()
+    assert cfg.read_only is True
+
+
+def test_list_production_entry_with_read_only_false_stays_writable(store: ClusterStore, root: Path):
+    write_yaml(
+        root, "clusters:\n  - {name: p, env: prd, bootstrap_servers: 'b:1', read_only: false}\n"
+    )
+    [cfg] = store.list()
+    assert cfg.read_only is False
+
+
+def test_create_persists_the_resolved_read_only(store: ClusterStore, root: Path):
+    store.create(ClusterInput(name="p", env="prd", bootstrap_servers="b:1"))
+    store.create(plaintext())
+    doc = yaml.safe_load(yaml_text(root))
+    assert [(c["name"], c["read_only"]) for c in doc["clusters"]] == [("p", True), ("dev", False)]
+
+
 # --- create -----------------------------------------------------------------------------------
 
 

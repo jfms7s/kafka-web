@@ -22,6 +22,10 @@ const KEEP_HINT = 'Leave blank to keep the saved value'
 
 const usesTls = (p: Protocol) => p === 'SSL' || p === 'SASL_SSL'
 const usesSasl = (p: Protocol) => p === 'SASL_PLAINTEXT' || p === 'SASL_SSL'
+// Same rule as the backend's PRODUCTION_ENVS (config/models.py), which applies it when
+// read_only is omitted; the form always sends read_only, so it applies the rule itself.
+const PRODUCTION_ENVS = ['prd', 'prod', 'production']
+const isProductionEnv = (env: string) => PRODUCTION_ENVS.includes(env.trim().toLowerCase())
 
 interface FormState {
   name: string
@@ -150,7 +154,7 @@ function FormBody({ saved }: { saved?: ClusterView }) {
     setForm((current) => ({
       ...current,
       env,
-      readOnly: !editing && !readOnlyTouched && env === 'prd' ? true : current.readOnly,
+      readOnly: !readOnlyTouched && isProductionEnv(env) ? true : current.readOnly,
     }))
   }
 
