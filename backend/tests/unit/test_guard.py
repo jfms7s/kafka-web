@@ -20,6 +20,8 @@ def store(tmp_path: Path, memory_keyring: MemoryKeyring) -> ClusterStore:
     store = ClusterStore(tmp_path / "cfg", SecretStore(memory_keyring))
     store.create(ClusterInput(name="prd", env="prd", bootstrap_servers="b:9092", read_only=True))
     store.create(ClusterInput(name="dev", env="dev", bootstrap_servers="b:9092"))
+    # A production env with no read_only is read-only by default.
+    store.create(ClusterInput(name="prod-eu", env="prod", bootstrap_servers="b:9092"))
     return store
 
 
@@ -65,3 +67,12 @@ def test_require_confirm_mismatch(given: str | None):
     assert info.value.code == "confirmation_mismatch"
     assert info.value.field == "confirm"
     assert info.value.status == 422
+
+
+def test_production_cluster_without_read_only_refuses_a_reset(client: TestClient):
+    response = client.post(
+        "/api/clusters/prod-eu/groups/g1/reset",
+        json={"topic": "t", "strategy": "latest", "confirm": "g1"},
+    )
+    assert response.status_code == 403
+    assert response.json()["code"] == "read_only_cluster"

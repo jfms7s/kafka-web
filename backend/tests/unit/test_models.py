@@ -249,3 +249,32 @@ def test_extra_keys_that_load_code_or_set_callbacks_rejected(key):
 )
 def test_file_and_tuning_extra_keys_still_accepted(key):
     assert make(extra={key: "x"}).extra == {key: "x"}
+
+
+# --- read_only default ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("env", ["prd", "PRD", "prod", "Prod", "production", " PRODUCTION "])
+def test_production_env_defaults_to_read_only(env):
+    assert make(env=env).read_only is True
+    assert make(env=env, read_only=None).read_only is True
+
+
+@pytest.mark.parametrize("env", ["stg", "dev", "prd-eu", "preprod", "production2"])
+def test_other_envs_default_to_writable(env):
+    assert make(env=env).read_only is False
+
+
+@pytest.mark.parametrize("model", [ClusterBase, ClusterConfig, ClusterInput])
+def test_explicit_read_only_false_wins_on_production(model):
+    cfg = model(name="prd-eu", env="prd", bootstrap_servers="b1:9092", read_only=False)
+    assert cfg.read_only is False
+
+
+def test_explicit_read_only_true_stays_on_other_envs():
+    assert make(env="dev", read_only=True).read_only is True
+
+
+def test_read_only_default_applies_to_config_and_input():
+    assert ClusterConfig(name="p", env="prod", bootstrap_servers="b:1").read_only is True
+    assert ClusterInput(name="p", env="prod", bootstrap_servers="b:1").read_only is True

@@ -123,6 +123,20 @@ def test_create_plaintext(client: TestClient):
     }
 
 
+@pytest.mark.parametrize("env", ["prd", "PRD", "prod", "production"])
+def test_create_production_without_read_only_is_read_only(client: TestClient, env: str):
+    response = client.post("/api/clusters", json=plaintext_body(name="p", env=env))
+    assert response.status_code == 201
+    assert response.json()["read_only"] is True
+    assert client.get("/api/clusters/p").json()["read_only"] is True
+
+
+def test_create_production_with_read_only_false_is_writable(client: TestClient):
+    response = client.post("/api/clusters", json=plaintext_body(env="prd", read_only=False))
+    assert response.status_code == 201
+    assert response.json()["read_only"] is False
+
+
 def test_create_with_a_secret_in_extra_is_422_on_extra(client: TestClient):
     body = plaintext_body(extra={"ssl.key.password": "hunter2-value"})
 
