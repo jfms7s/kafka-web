@@ -7,7 +7,7 @@ final say: a consumer can join between the check and the write, and the broker's
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -26,7 +26,7 @@ from kafka_web.kafka.topic_lookup import topic_partition_ids
 
 DEFAULT_TIMEOUT_S = 10.0
 
-ResetStrategy = Literal["earliest", "latest", "timestamp"]
+ResetStrategy = Literal["earliest", "latest", "timestamp", "to_offset", "shift_by"]
 StartPosition = Literal["earliest", "latest"]
 
 # What a broker answers to an offset write or a delete aimed at a group that has live members.
@@ -73,6 +73,17 @@ class OffsetView:
     committed: int | None
     end: int | None
     lag: int | None
+
+
+@dataclass(frozen=True)
+class ResetTarget:
+    """One partition of a planned reset: where the group is and where it would be moved."""
+
+    topic: str
+    partition: int
+    current: int | None  # the committed offset, None if the group has none there
+    target: int
+    clamped: bool  # the requested offset lay outside [earliest, end] and was moved inside
 
 
 @dataclass(frozen=True)
@@ -280,19 +291,19 @@ def _resolved(
     return offsets
 
 
-def resolve_targets(
+def _strategy_offsets(
     admin: AdminClient,
     topic: str,
-    strategy: ResetStrategy,
+    partitions: list[int],
+    strategy: Literal["earliest", "latest", "timestamp"],
     timestamp: int | None,
-    timeout: float = DEFAULT_TIMEOUT_S,
-) -> list[TopicPartition]:
-    """Every partition of `topic` with the offset `strategy` selects."""
+    timeout: float,
+) -> dict[int, int]:
+    """The offset `strategy` selects on each of `partitions`."""
     if strategy == "timestamp" and (timestamp is None or timestamp < 0):
         raise ValidationFailed(
             "timestamp: a non-negative epoch-milliseconds value is required", field="timestamp"
         )
-    partitions = _topic_partitions(admin, topic, timeout)
     match strategy:
         case "earliest":
             offsets = _resolved(
@@ -312,7 +323,99 @@ def resolve_targets(
     unresolved = [p for p in partitions if offsets.get(p, -1) < 0]
     if unresolved:
         raise BrokerError(f"Could not resolve the {strategy} offset of partitions {unresolved}")
+    return offsets
+
+
+def resolve_targets(
+    admin: AdminClient,
+    topic: str,
+    strategy: Literal["earliest", "latest", "timestamp"],
+    timestamp: int | None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> list[TopicPartition]:
+    """Every partition of `topic` with the offset `strategy` selects."""
+    partitions = _topic_partitions(admin, topic, timeout)
+    offsets = _strategy_offsets(admin, topic, partitions, strategy, timestamp, timeout)
     return [TopicPartition(topic, p, offsets[p]) for p in partitions]
+
+
+def _chosen_partitions(
+    admin: AdminClient, topic: str, requested: Collection[int] | None, timeout: float
+) -> list[int]:
+    """`requested` (or every partition when None), sorted; ids the topic lacks are a 422."""
+    existing = _topic_partitions(admin, topic, timeout)
+    if requested is None:
+        return sorted(existing)
+    unknown = sorted(set(requested) - set(existing))
+    if unknown:
+        raise ValidationFailed(
+            f"partitions: topic {topic!r} has no partition {', '.join(map(str, unknown))}",
+            field="partitions",
+        )
+    return sorted(set(requested))
+
+
+def _clamped_offsets(
+    admin: AdminClient, topic: str, requested: dict[int, int], timeout: float
+) -> dict[int, tuple[int, bool]]:
+    """Each requested offset moved into its partition's [earliest, end], and whether it moved."""
+    partitions = list(requested)
+    low = _strategy_offsets(admin, topic, partitions, "earliest", None, timeout)
+    high = _strategy_offsets(admin, topic, partitions, "latest", None, timeout)
+    out: dict[int, tuple[int, bool]] = {}
+    for p, offset in requested.items():
+        target = min(max(offset, low[p]), high[p])
+        out[p] = (target, target != offset)
+    return out
+
+
+def _plan_reset(
+    admin: AdminClient,
+    group_id: str,
+    topic: str,
+    strategy: ResetStrategy,
+    timestamp: int | None,
+    timeout: float,
+    *,
+    partitions: Collection[int] | None,
+    offsets: Mapping[int, int] | None,
+    shift: int | None,
+) -> list[ResetTarget]:
+    """Where a reset would move each chosen partition; checks the group is empty first."""
+    if strategy == "to_offset" and not offsets:
+        raise ValidationFailed(
+            "partitions: to_offset needs an offset for each partition", field="partitions"
+        )
+    if strategy == "shift_by" and shift is None:
+        raise ValidationFailed("shift: required for shift_by", field="shift")
+    _require_empty(_describe(admin, group_id, timeout), group_id)
+    committed = {
+        p: offset
+        for (t, p), offset in _committed_offsets(admin, group_id, timeout).items()
+        if t == topic and offset >= 0
+    }
+    if strategy == "to_offset":
+        assert offsets is not None
+        chosen = _chosen_partitions(admin, topic, list(offsets), timeout)
+        resolved = _clamped_offsets(admin, topic, {p: offsets[p] for p in chosen}, timeout)
+    elif strategy == "shift_by":
+        assert shift is not None
+        chosen = _chosen_partitions(admin, topic, partitions, timeout)
+        missing = [p for p in chosen if p not in committed]
+        if missing:
+            raise ValidationFailed(
+                f"partitions: partition {', '.join(map(str, missing))} of {topic!r} has no "
+                "committed offset to shift from",
+                field="partitions",
+            )
+        resolved = _clamped_offsets(
+            admin, topic, {p: committed[p] + shift for p in chosen}, timeout
+        )
+    else:
+        chosen = _chosen_partitions(admin, topic, partitions, timeout)
+        selected = _strategy_offsets(admin, topic, chosen, strategy, timestamp, timeout)
+        resolved = {p: (selected[p], False) for p in chosen}
+    return [ResetTarget(topic, p, committed.get(p), resolved[p][0], resolved[p][1]) for p in chosen]
 
 
 def _alter(
@@ -328,6 +431,37 @@ def _alter(
     _run_group_request(commit, timeout, write=True)
 
 
+def preview_reset(
+    admin: AdminClient,
+    group_id: str,
+    topic: str,
+    strategy: ResetStrategy,
+    timestamp: int | None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    *,
+    partitions: Collection[int] | None = None,
+    offsets: Mapping[int, int] | None = None,
+    shift: int | None = None,
+) -> list[ResetTarget]:
+    """The targets `reset_offsets` would commit, without committing anything.
+
+    `partitions` limits the reset (None: every partition); `to_offset` takes its partitions from
+    `offsets`; `shift_by` moves each committed offset by `shift`. Targets outside a partition's
+    [earliest, end] are clamped into it and flagged.
+    """
+    return _plan_reset(
+        admin,
+        group_id,
+        topic,
+        strategy,
+        timestamp,
+        timeout,
+        partitions=partitions,
+        offsets=offsets,
+        shift=shift,
+    )
+
+
 def reset_offsets(
     admin: AdminClient,
     group_id: str,
@@ -335,12 +469,33 @@ def reset_offsets(
     strategy: ResetStrategy,
     timestamp: int | None,
     timeout: float = DEFAULT_TIMEOUT_S,
+    *,
+    partitions: Collection[int] | None = None,
+    offsets: Mapping[int, int] | None = None,
+    shift: int | None = None,
 ) -> list[OffsetView]:
-    _require_empty(_describe(admin, group_id, timeout), group_id)
-    targets = resolve_targets(admin, topic, strategy, timestamp, timeout)
-    _alter(admin, group_id, targets, timeout)
-    committed = {(tp.topic, tp.partition): tp.offset for tp in targets}
-    return _offset_views(admin, committed, timeout)
+    """Commit the planned targets (see `preview_reset`); partitions not chosen are untouched."""
+    plan = _plan_reset(
+        admin,
+        group_id,
+        topic,
+        strategy,
+        timestamp,
+        timeout,
+        partitions=partitions,
+        offsets=offsets,
+        shift=shift,
+    )
+    _alter(admin, group_id, [TopicPartition(t.topic, t.partition, t.target) for t in plan], timeout)
+    committed = {(t.topic, t.partition): t.target for t in plan}
+    try:
+        return _offset_views(admin, committed, timeout)
+    except AppError:
+        # The offsets are committed; only reading the end offsets failed. Report the reset as
+        # done with the lag unknown rather than as a failure.
+        return [
+            OffsetView(t, p, offset, None, None) for (t, p), offset in sorted(committed.items())
+        ]
 
 
 def _exists(admin: AdminClient, group_id: str, timeout: float) -> bool:

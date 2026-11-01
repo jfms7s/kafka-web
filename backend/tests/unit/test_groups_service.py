@@ -14,10 +14,12 @@ from kafka_web.services.groups import (
     GroupSummary,
     MemberView,
     OffsetView,
+    ResetTarget,
     create_group,
     delete_group,
     describe_group,
     list_groups,
+    preview_reset,
     reset_offsets,
     resolve_targets,
 )
@@ -361,6 +363,139 @@ def test_reset_timestamp_without_a_timestamp_is_422_and_alters_nothing() -> None
     with pytest.raises(ValidationFailed):
         reset_offsets(admin, "g", "orders", "timestamp", None)
     assert admin.alter_calls == []
+
+
+def test_reset_reports_success_when_the_trailing_end_offset_read_fails() -> None:
+    admin = empty_group_admin()
+    admin.list_offsets_errors = {}
+    calls = {"n": 0}
+    original = admin.list_offsets
+
+    def flaky(specs, **kwargs):
+        calls["n"] += 1
+        if calls["n"] > 1:  # the resolve succeeds; the read after the commit fails
+            raise kafka_exc(KafkaError._TRANSPORT)
+        return original(specs, **kwargs)
+
+    admin.list_offsets = flaky  # type: ignore[method-assign]
+
+    result = reset_offsets(admin, "g", "orders", "latest", None)
+
+    assert admin.alter_calls == [("g", [("orders", 0, 10), ("orders", 1, 6)])]
+    assert result == [
+        OffsetView("orders", 0, committed=10, end=None, lag=None),
+        OffsetView("orders", 1, committed=6, end=None, lag=None),
+    ]
+
+
+# --- precise resets ----------------------------------------------------------------------------
+
+
+def precise_admin(**kwargs) -> FakeGroupAdmin:
+    defaults = {
+        "descriptions": {"g": group_description("g", "EMPTY")},
+        "committed": {"g": {("orders", 0): 500, ("orders", 1): 40, ("orders", 2): 7}},
+        "topics": {"orders": 3},
+        "latest": {("orders", 0): 900, ("orders", 1): 50, ("orders", 2): 9},
+        "earliest": {("orders", 0): 100, ("orders", 1): 0, ("orders", 2): 0},
+    }
+    return FakeGroupAdmin(**{**defaults, **kwargs})
+
+
+def test_to_offset_on_one_partition_commits_only_that_partition() -> None:
+    admin = precise_admin()
+
+    result = reset_offsets(admin, "g", "orders", "to_offset", None, offsets={1: 45})
+
+    assert admin.alter_calls == [("g", [("orders", 1, 45)])]
+    assert result == [OffsetView("orders", 1, committed=45, end=50, lag=5)]
+
+
+def test_to_offset_outside_the_log_is_clamped_and_flagged() -> None:
+    admin = precise_admin()
+
+    targets = preview_reset(admin, "g", "orders", "to_offset", None, offsets={0: 5, 1: 99, 2: 8})
+
+    assert targets == [
+        ResetTarget("orders", 0, current=500, target=100, clamped=True),
+        ResetTarget("orders", 1, current=40, target=50, clamped=True),
+        ResetTarget("orders", 2, current=7, target=8, clamped=False),
+    ]
+    assert admin.alter_calls == []
+
+
+def test_shift_by_minus_1000_from_500_clamps_to_earliest() -> None:
+    admin = precise_admin()
+
+    reset_offsets(admin, "g", "orders", "shift_by", None, partitions=[0], shift=-1000)
+
+    assert admin.alter_calls == [("g", [("orders", 0, 100)])]
+
+
+def test_shift_by_every_partition_by_default() -> None:
+    admin = precise_admin()
+
+    targets = preview_reset(admin, "g", "orders", "shift_by", None, shift=1)
+
+    assert [(t.partition, t.current, t.target, t.clamped) for t in targets] == [
+        (0, 500, 501, False),
+        (1, 40, 41, False),
+        (2, 7, 8, False),
+    ]
+
+
+def test_shift_by_past_the_end_clamps_to_the_end() -> None:
+    admin = precise_admin()
+
+    reset_offsets(admin, "g", "orders", "shift_by", None, partitions=[1], shift=2**63 - 1)
+
+    assert admin.alter_calls == [("g", [("orders", 1, 50)])]
+
+
+def test_shift_by_on_a_partition_without_a_committed_offset_is_422_naming_it() -> None:
+    admin = precise_admin(committed={"g": {("orders", 0): 500}})
+
+    with pytest.raises(ValidationFailed) as caught:
+        reset_offsets(admin, "g", "orders", "shift_by", None, partitions=[0, 2], shift=-1)
+
+    assert caught.value.field == "partitions"
+    assert "2" in caught.value.message
+    assert admin.alter_calls == []
+
+
+def test_unknown_partition_is_422_on_partitions() -> None:
+    admin = precise_admin()
+
+    with pytest.raises(ValidationFailed) as caught:
+        reset_offsets(admin, "g", "orders", "to_offset", None, offsets={7: 1})
+
+    assert caught.value.field == "partitions"
+    assert "7" in caught.value.message
+    assert admin.alter_calls == []
+
+
+def test_simple_strategies_can_target_a_subset() -> None:
+    admin = precise_admin()
+
+    reset_offsets(admin, "g", "orders", "earliest", None, partitions=[2, 0])
+
+    assert admin.alter_calls == [("g", [("orders", 0, 100), ("orders", 2, 0)])]
+
+
+def test_preview_of_an_active_group_is_409() -> None:
+    admin = precise_admin(descriptions={"g": group_description("g", "STABLE")})
+
+    with pytest.raises(Conflict) as caught:
+        preview_reset(admin, "g", "orders", "latest", None)
+    assert caught.value.code == "group_not_empty"
+
+
+def test_preview_reports_uncommitted_partitions_as_current_none() -> None:
+    admin = precise_admin(committed={"g": {}})
+
+    targets = preview_reset(admin, "g", "orders", "latest", None, partitions=[1])
+
+    assert targets == [ResetTarget("orders", 1, current=None, target=50, clamped=False)]
 
 
 # --- create ------------------------------------------------------------------------------------

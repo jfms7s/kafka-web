@@ -1,4 +1,5 @@
 import { useId, useState } from 'react'
+import type { ReactNode } from 'react'
 
 interface Props {
   open: boolean
@@ -8,6 +9,8 @@ interface Props {
   confirmLabel: string
   onConfirm: (typed: string) => void
   onCancel: () => void
+  /** Extra detail shown under the description, e.g. what exactly will change. */
+  children?: ReactNode
 }
 
 export function ConfirmDialog(props: Props) {
@@ -15,7 +18,15 @@ export function ConfirmDialog(props: Props) {
   return props.open ? <Dialog {...props} /> : null
 }
 
-function Dialog({ title, description, expected, confirmLabel, onConfirm, onCancel }: Props) {
+function Dialog({
+  title,
+  description,
+  expected,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  children,
+}: Props) {
   const [typed, setTyped] = useState('')
   const titleId = useId()
   const inputId = useId()
@@ -34,6 +45,7 @@ function Dialog({ title, description, expected, confirmLabel, onConfirm, onCance
           {title}
         </h2>
         <p className="mt-2 text-sm text-slate-600">{description}</p>
+        {children}
         <label htmlFor={inputId} className="mt-4 block text-sm text-slate-700">
           Type <code className="rounded bg-slate-100 px-1 font-mono">{expected}</code> to confirm
         </label>

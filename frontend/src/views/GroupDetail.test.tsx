@@ -39,10 +39,26 @@ interface Options {
   readOnly?: boolean
   state?: string
   reset?: Handler
+  preview?: Handler
   remove?: Handler
 }
 
-function setup({ readOnly = false, state = 'empty', reset, remove }: Options = {}) {
+/** A preview that moves every requested partition to offset 42 (or its `offset`). */
+async function echoPreview(request: Request): Promise<Response> {
+  const body = await request.clone().json() // the test may read the body too
+  const parts: { partition: number; offset?: number }[] = body.partitions ?? [{ partition: 0 }]
+  return Response.json({
+    targets: parts.map((p) => ({
+      topic: body.topic,
+      partition: p.partition,
+      current: 7,
+      target: p.offset ?? 42,
+      clamped: false,
+    })),
+  })
+}
+
+function setup({ readOnly = false, state = 'empty', reset, preview, remove }: Options = {}) {
   fetchMock = vi.fn(async (request: Request) => {
     const url = new URL(request.url)
     const path = url.pathname
@@ -53,6 +69,7 @@ function setup({ readOnly = false, state = 'empty', reset, remove }: Options = {
     if (path === '/api/clusters/dev/groups/ghost') {
       return Response.json({ code: 'group_not_found', message: 'No such group' }, { status: 404 })
     }
+    if (path.endsWith('/reset/preview')) return (preview ?? echoPreview)(request)
     if (path.endsWith('/reset')) {
       return (await reset?.(request)) ?? Response.json({ offsets: [] })
     }
@@ -76,7 +93,12 @@ function setup({ readOnly = false, state = 'empty', reset, remove }: Options = {
   return userEvent.setup()
 }
 
-const writes = () => fetchMock.mock.calls.map(([r]) => r).filter((r) => r.method !== 'GET')
+const writes = () =>
+  fetchMock.mock.calls
+    .map(([r]) => r)
+    .filter((r) => r.method !== 'GET' && !r.url.endsWith('/reset/preview'))
+const previews = () =>
+  fetchMock.mock.calls.map(([r]) => r).filter((r) => r.url.endsWith('/reset/preview'))
 const detailGets = () =>
   fetchMock.mock.calls.filter(([r]) => r.method === 'GET' && r.url.endsWith('/groups/billing'))
 
@@ -246,6 +268,109 @@ describe('GroupDetail reset', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Reset offsets' }))
 
     expect(await screen.findByText('Group is not empty')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+})
+
+describe('GroupDetail precise reset', () => {
+  it('pre-fills the partition table from the group offsets and "skip one" sets committed + 1', async () => {
+    const user = setup()
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Topic' }), 'orders')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Strategy' }), 'to_offset')
+
+    const table = screen.getByRole('table', { name: 'Partitions to reset' })
+    expect(within(table).getAllByRole('row')).toHaveLength(3) // header + partitions 0 and 1
+    const target0 = screen.getByLabelText('Target offset of partition 0')
+    expect(target0).toHaveValue('7')
+    expect(screen.getByLabelText('Target offset of partition 1')).toHaveValue('4')
+
+    await user.click(screen.getByRole('button', { name: 'Skip one on partition 0' }))
+    expect(target0).toHaveValue('8')
+  })
+
+  it('previews only the chosen partition and commits the same body after confirmation', async () => {
+    const user = setup({
+      preview: () =>
+        Response.json({
+          targets: [{ topic: 'orders', partition: 0, current: 7, target: 10, clamped: true }],
+        }),
+    })
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Topic' }), 'orders')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Strategy' }), 'to_offset')
+    await user.click(screen.getByLabelText('Reset partition 1'))
+    const target0 = screen.getByLabelText('Target offset of partition 0')
+    await user.clear(target0)
+    await user.type(target0, '99')
+
+    await user.click(screen.getByRole('button', { name: 'Reset offsets' }))
+    const dialog = await screen.findByRole('dialog')
+    const expected = { topic: 'orders', strategy: 'to_offset', partitions: [{ partition: 0, offset: 99 }] }
+    expect(await previews()[0].json()).toEqual(expected)
+    const listed = within(dialog).getByRole('list', { name: 'Reset targets' })
+    expect(listed).toHaveTextContent('partition 0: 7 → 10 (clamped to the log)')
+    expect(writes()).toHaveLength(0)
+
+    await user.type(within(dialog).getByRole('textbox'), 'billing')
+    await user.click(within(dialog).getByRole('button', { name: 'Reset offsets' }))
+
+    await waitFor(() => expect(writes()).toHaveLength(1))
+    expect(await writes()[0].json()).toEqual({ ...expected, confirm: 'billing' })
+  })
+
+  it('sends a shift and the chosen subset for shift by', async () => {
+    const user = setup()
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Topic' }), 'orders')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Strategy' }), 'shift_by')
+    await user.type(screen.getByLabelText('Shift by'), '-1000')
+    await user.click(screen.getByLabelText('Reset partition 0'))
+
+    await user.click(screen.getByRole('button', { name: 'Reset offsets' }))
+
+    await screen.findByRole('dialog')
+    expect(await previews()[0].json()).toEqual({
+      topic: 'orders',
+      strategy: 'shift_by',
+      shift: -1000,
+      partitions: [{ partition: 1 }],
+    })
+  })
+
+  it.each([
+    ['shift_by', 'Shift must be a whole number'],
+    ['to_offset', 'Partition 0 needs a target offset of 0 or more'],
+  ])('refuses to preview %s with a bad number', async (strategy, message) => {
+    const user = setup()
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Strategy' }), strategy)
+    if (strategy === 'to_offset') await user.clear(screen.getByLabelText('Target offset of partition 0'))
+
+    await user.click(screen.getByRole('button', { name: 'Reset offsets' }))
+
+    expect(screen.getByText(message)).toBeInTheDocument()
+    expect(previews()).toHaveLength(0)
+  })
+
+  it('refuses to preview with no partition chosen', async () => {
+    const user = setup()
+    await user.click(await screen.findByLabelText('Reset partition 0'))
+
+    await user.click(screen.getByRole('button', { name: 'Reset offsets' }))
+
+    expect(screen.getByText('Choose at least one partition')).toBeInTheDocument()
+    expect(previews()).toHaveLength(0)
+  })
+
+  it('toasts a refused preview and opens no confirmation', async () => {
+    const user = setup({
+      preview: () =>
+        Response.json(
+          { code: 'validation_failed', message: 'partitions: no committed offset', field: 'partitions' },
+          { status: 422 },
+        ),
+    })
+
+    await user.click(await screen.findByRole('button', { name: 'Reset offsets' }))
+
+    expect(await screen.findByText('partitions: no committed offset')).toBeInTheDocument()
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

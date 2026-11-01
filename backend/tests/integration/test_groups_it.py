@@ -165,6 +165,48 @@ def test_reset_to_latest_earliest_and_timestamp(
     assert earliest.json()["offsets"][0]["lag"] == MESSAGES
 
 
+def test_precise_reset_moves_only_the_chosen_partition(
+    api: TestClient,
+    cluster: str,
+    topic_factory: Callable[..., str],
+    kafka_plaintext: str,
+    group_id: str,
+) -> None:
+    name = topic_factory(partitions=3)
+    producer = Producer({"bootstrap.servers": kafka_plaintext})
+    for partition in range(3):
+        for i in range(MESSAGES):
+            producer.produce(name, value=f"m{i}".encode(), partition=partition)
+    assert producer.flush(30) == 0
+    assert create(api, cluster, group_id, name).status_code == 201  # every partition at 0
+
+    body = {"partitions": [{"partition": 1, "offset": 7}]}
+    preview = api.post(
+        f"/api/clusters/{cluster}/groups/{group_id}/reset/preview",
+        json={"topic": name, "strategy": "to_offset", **body},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["targets"] == [
+        {"topic": name, "partition": 1, "current": 0, "target": 7, "clamped": False}
+    ]
+
+    response = reset(api, cluster, group_id, name, "to_offset", **body)
+    assert response.status_code == 200, response.text
+    committed = {
+        o["partition"]: o["committed"]
+        for o in api.get(f"/api/clusters/{cluster}/groups/{group_id}").json()["offsets"]
+    }
+    assert committed == {0: 0, 1: 7, 2: 0}
+
+    shifted = reset(
+        api, cluster, group_id, name, "shift_by", shift=-1000, partitions=[{"partition": 1}]
+    )
+    assert shifted.status_code == 200, shifted.text
+    assert shifted.json()["offsets"] == [
+        {"topic": name, "partition": 1, "committed": 0, "end": MESSAGES, "lag": MESSAGES}
+    ]
+
+
 def test_reset_and_create_on_an_unknown_topic_are_404(
     api: TestClient, cluster: str, topic: str, group_id: str
 ) -> None:

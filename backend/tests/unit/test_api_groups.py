@@ -247,6 +247,109 @@ def test_reset_needs_the_group_id_as_confirmation(harness: Harness, confirm: str
     assert harness.admin.alter_calls == []
 
 
+def test_reset_to_offset_on_one_partition(harness: Harness) -> None:
+    response = reset(harness, strategy="to_offset", partitions=[{"partition": 1, "offset": 4}])
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "offsets": [{"topic": "orders", "partition": 1, "committed": 4, "end": 6, "lag": 2}]
+    }
+    assert harness.admin.alter_calls == [("audit", [("orders", 1, 4)])]
+
+
+def test_reset_shift_by(harness: Harness) -> None:
+    response = reset(harness, strategy="shift_by", shift=2, partitions=[{"partition": 0}])
+
+    assert response.status_code == 200
+    assert harness.admin.alter_calls == [("audit", [("orders", 0, 3)])]
+
+
+def test_preview_returns_resolved_targets_and_commits_nothing(harness: Harness) -> None:
+    body = {
+        "topic": "orders",
+        "strategy": "to_offset",
+        "partitions": [{"partition": 0, "offset": 99}, {"partition": 1, "offset": 5}],
+    }
+
+    response = harness.client.post(f"{GROUPS}/audit/reset/preview", json=body)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "targets": [
+            {"topic": "orders", "partition": 0, "current": 1, "target": 10, "clamped": True},
+            {"topic": "orders", "partition": 1, "current": 1, "target": 5, "clamped": False},
+        ]
+    }
+    assert harness.admin.alter_calls == []
+
+
+def test_preview_of_a_stable_group_is_409(harness: Harness) -> None:
+    response = harness.client.post(
+        f"{GROUPS}/billing/reset/preview", json={"topic": "orders", "strategy": "latest"}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "group_not_empty"
+
+
+def test_reset_unknown_partition_is_422_on_partitions(harness: Harness) -> None:
+    response = reset(harness, strategy="to_offset", partitions=[{"partition": 9, "offset": 1}])
+
+    assert response.status_code == 422
+    assert response.json()["field"] == "partitions"
+    assert "9" in response.json()["message"]
+    assert harness.admin.alter_calls == []
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ({"strategy": "to_offset"}, "partitions"),
+        ({"strategy": "to_offset", "partitions": [{"partition": 0}]}, "partitions"),
+        ({"strategy": "latest", "partitions": [{"partition": 0, "offset": 1}]}, "partitions"),
+        ({"strategy": "latest", "partitions": [{"partition": 0}, {"partition": 0}]}, "partitions"),
+        ({"strategy": "latest", "partitions": []}, "partitions"),
+        ({"strategy": "shift_by"}, "shift"),
+        ({"strategy": "latest", "shift": 1}, "shift"),
+        ({"strategy": "shift_by", "shift": 2**63}, "shift"),
+        ({"strategy": "latest", "partitions": [{"partition": 2**31}]}, "partitions.0.partition"),
+        ({"strategy": "latest", "partitions": [{"partition": -1}]}, "partitions.0.partition"),
+        (
+            {"strategy": "to_offset", "partitions": [{"partition": 0, "offset": 2**63}]},
+            "partitions.0.offset",
+        ),
+    ],
+)
+def test_reset_body_shape_errors_name_the_field(
+    harness: Harness, body: dict[str, Any], field: str
+) -> None:
+    response = reset(harness, **body)
+
+    assert response.status_code == 422
+    assert response.json()["field"] == field
+    assert harness.admin.alter_calls == []
+
+
+def test_reset_shift_by_without_committed_offset_is_422(harness: Harness) -> None:
+    harness.admin.committed["audit"] = {("orders", 0): 1}
+
+    response = reset(harness, strategy="shift_by", shift=-1)
+
+    assert response.status_code == 422
+    assert response.json()["field"] == "partitions"
+    assert harness.admin.alter_calls == []
+
+
+def test_precise_reset_still_needs_the_confirmation(harness: Harness) -> None:
+    response = reset(
+        harness, strategy="to_offset", partitions=[{"partition": 1, "offset": 4}], confirm="nope"
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "confirmation_mismatch"
+    assert harness.admin.alter_calls == []
+
+
 # --- delete ------------------------------------------------------------------------------------
 
 
@@ -302,6 +405,18 @@ def test_read_only_cluster_refuses_every_write(harness: Harness) -> None:
         harness.client.post(
             f"{base}/audit/reset",
             json={"topic": "orders", "strategy": "latest", "confirm": "audit"},
+        ),
+        harness.client.post(
+            f"{base}/audit/reset",
+            json={
+                "topic": "orders",
+                "strategy": "to_offset",
+                "partitions": [{"partition": 1, "offset": 3}],
+                "confirm": "audit",
+            },
+        ),
+        harness.client.post(
+            f"{base}/audit/reset/preview", json={"topic": "orders", "strategy": "latest"}
         ),
         harness.client.delete(f"{base}/audit", params={"confirm": "audit"}),
     ]

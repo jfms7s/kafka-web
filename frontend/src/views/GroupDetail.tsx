@@ -6,9 +6,16 @@ import {
   groupsPath,
   useDeleteGroup,
   useGroup,
+  usePreviewReset,
   useResetOffsets,
 } from '../api/hooks/groups'
-import type { GroupDetail as GroupDetailView, ResetStrategy } from '../api/hooks/groups'
+import type {
+  GroupDetail as GroupDetailView,
+  GroupOffset,
+  ResetSpec,
+  ResetStrategy,
+  ResetTarget,
+} from '../api/hooks/groups'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { GroupStateBadge } from '../components/GroupStateBadge'
 import { useToast } from '../components/Toasts'
@@ -172,47 +179,9 @@ function blockedReason(readOnly: boolean, state: string): string | null {
 function Actions({ cluster, group, detail, readOnly }: ActionsProps) {
   const toast = useToast()
   const navigate = useNavigate()
-  const reset = useResetOffsets(cluster, group)
   const remove = useDeleteGroup(cluster, group)
-  const ids = { topic: useId(), strategy: useId(), timestamp: useId() }
-
-  const topics = useMemo(
-    () => [...new Set(detail.offsets.map((o) => o.topic))].sort(),
-    [detail.offsets],
-  )
-  const [topicChoice, setTopic] = useState('')
-  const [strategy, setStrategy] = useState<ResetStrategy>('latest')
-  const [timestamp, setTimestamp] = useState('')
-  const [timestampError, setTimestampError] = useState<string | null>(null)
-  const [dialog, setDialog] = useState<'reset' | 'delete' | null>(null)
-
-  const topic = topics.includes(topicChoice) ? topicChoice : (topics[0] ?? '')
+  const [deleting, setDeleting] = useState(false)
   const blocked = blockedReason(readOnly, detail.state)
-
-  const requestReset = (event: FormEvent) => {
-    event.preventDefault()
-    if (strategy === 'timestamp' && Number.isNaN(new Date(timestamp).getTime())) {
-      setTimestampError('Timestamp is required')
-      return
-    }
-    setTimestampError(null)
-    setDialog('reset')
-  }
-
-  const confirmReset = (confirm: string) =>
-    reset.mutate(
-      {
-        topic,
-        strategy,
-        ...(strategy === 'timestamp' && { timestamp: new Date(timestamp).getTime() }),
-        confirm,
-      },
-      {
-        onSuccess: () => toast.success(`Offsets of ${group} reset.`),
-        onError: (failure) => toast.error(failure),
-        onSettled: () => setDialog(null),
-      },
-    )
 
   const confirmDelete = (confirm: string) =>
     remove.mutate(confirm, {
@@ -222,7 +191,7 @@ function Actions({ cluster, group, detail, readOnly }: ActionsProps) {
       },
       onError: (failure) => {
         toast.error(failure)
-        setDialog(null)
+        setDeleting(false)
       },
     })
 
@@ -237,66 +206,14 @@ function Actions({ cluster, group, detail, readOnly }: ActionsProps) {
         </p>
       )}
 
-      <form onSubmit={requestReset} className="flex flex-wrap items-end gap-4">
-        <div className="flex flex-col gap-1 text-sm text-slate-600">
-          <label htmlFor={ids.topic}>Topic</label>
-          <select
-            id={ids.topic}
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            className={INPUT}
-          >
-            {topics.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="flex flex-col gap-1 text-sm text-slate-600">
-          <label htmlFor={ids.strategy}>Strategy</label>
-          <select
-            id={ids.strategy}
-            value={strategy}
-            onChange={(e) => setStrategy(e.target.value as ResetStrategy)}
-            className={INPUT}
-          >
-            <option value="earliest">earliest</option>
-            <option value="latest">latest</option>
-            <option value="timestamp">timestamp</option>
-          </select>
-        </div>
-        {strategy === 'timestamp' && (
-          <div className="flex flex-col gap-1 text-sm text-slate-600">
-            <label htmlFor={ids.timestamp}>Timestamp</label>
-            <input
-              id={ids.timestamp}
-              type="datetime-local"
-              value={timestamp}
-              onChange={(e) => setTimestamp(e.target.value)}
-              aria-invalid={timestampError ? true : undefined}
-              className={INPUT}
-            />
-            {timestampError && <p className="text-red-700">{timestampError}</p>}
-          </div>
-        )}
-        <span title={blocked ?? undefined}>
-          <button
-            type="submit"
-            disabled={blocked !== null || topics.length === 0 || reset.isPending}
-            className={BUTTON}
-          >
-            Reset offsets
-          </button>
-        </span>
-      </form>
+      <ResetForm cluster={cluster} group={group} detail={detail} blocked={blocked} />
 
       <div>
         <span title={blocked ?? undefined}>
           <button
             type="button"
             disabled={blocked !== null || remove.isPending}
-            onClick={() => setDialog('delete')}
+            onClick={() => setDeleting(true)}
             className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Delete group
@@ -305,23 +222,280 @@ function Actions({ cluster, group, detail, readOnly }: ActionsProps) {
       </div>
 
       <ConfirmDialog
-        open={dialog === 'reset'}
-        title="Reset offsets"
-        description={`Resets ${group} on topic ${topic} to ${strategy}. Consumers will resume from there.`}
-        expected={group}
-        confirmLabel="Reset offsets"
-        onConfirm={confirmReset}
-        onCancel={() => setDialog(null)}
-      />
-      <ConfirmDialog
-        open={dialog === 'delete'}
+        open={deleting}
         title="Delete group"
         description={`Deletes ${group} and all its committed offsets. This cannot be undone.`}
         expected={group}
         confirmLabel="Delete group"
         onConfirm={confirmDelete}
-        onCancel={() => setDialog(null)}
+        onCancel={() => setDeleting(false)}
       />
     </section>
+  )
+}
+
+const STRATEGY_LABELS: Record<ResetStrategy, string> = {
+  earliest: 'earliest',
+  latest: 'latest',
+  timestamp: 'timestamp',
+  to_offset: 'to offset',
+  shift_by: 'shift by',
+}
+
+/** One partition row of the reset form: whether it is reset and, for to_offset, to where. */
+interface RowState {
+  selected: boolean
+  target: string
+}
+
+const rowKey = (o: GroupOffset) => `${o.topic}/${o.partition}`
+const defaultRow = (o: GroupOffset): RowState => ({
+  selected: true,
+  target: o.committed === null ? '' : String(o.committed),
+})
+const asOffset = (text: string): number | null => {
+  const value = Number(text.trim())
+  return text.trim() !== '' && Number.isSafeInteger(value) ? value : null
+}
+
+interface ResetFormProps {
+  cluster: string
+  group: string
+  detail: GroupDetailView
+  blocked: string | null
+}
+
+/**
+ * Reset one topic's partitions: all or some, to earliest / latest / a timestamp, to explicit
+ * offsets or by a shift. The resolved targets are previewed before the typed confirmation.
+ */
+function ResetForm({ cluster, group, detail, blocked }: ResetFormProps) {
+  const toast = useToast()
+  const preview = usePreviewReset(cluster, group)
+  const reset = useResetOffsets(cluster, group)
+  const ids = { topic: useId(), strategy: useId(), timestamp: useId(), shift: useId() }
+
+  const topics = useMemo(
+    () => [...new Set(detail.offsets.map((o) => o.topic))].sort(),
+    [detail.offsets],
+  )
+  const [topicChoice, setTopic] = useState('')
+  const [strategy, setStrategy] = useState<ResetStrategy>('latest')
+  const [timestamp, setTimestamp] = useState('')
+  const [shift, setShift] = useState('')
+  const [rowEdits, setRowEdits] = useState<Record<string, RowState>>({})
+  const [formError, setFormError] = useState<string | null>(null)
+  const [plan, setPlan] = useState<{ spec: ResetSpec; targets: ResetTarget[] } | null>(null)
+
+  const topic = topics.includes(topicChoice) ? topicChoice : (topics[0] ?? '')
+  const partitions = detail.offsets
+    .filter((o) => o.topic === topic)
+    .sort((a, b) => a.partition - b.partition)
+  const row = (o: GroupOffset) => rowEdits[rowKey(o)] ?? defaultRow(o)
+  const editRow = (o: GroupOffset, change: Partial<RowState>) =>
+    setRowEdits((current) => ({ ...current, [rowKey(o)]: { ...row(o), ...change } }))
+  const chosen = partitions.filter((o) => row(o).selected)
+
+  /** The request body, or the reason the form is not ready. */
+  function buildSpec(): ResetSpec | string {
+    if (chosen.length === 0) return 'Choose at least one partition'
+    const spec: ResetSpec = { topic, strategy }
+    if (strategy === 'timestamp') {
+      const millis = new Date(timestamp).getTime()
+      if (Number.isNaN(millis)) return 'Timestamp is required'
+      spec.timestamp = millis
+    }
+    if (strategy === 'shift_by') {
+      const by = asOffset(shift)
+      if (by === null) return 'Shift must be a whole number'
+      spec.shift = by
+    }
+    if (strategy === 'to_offset') {
+      const targets = chosen.map((o) => ({ partition: o.partition, offset: asOffset(row(o).target) }))
+      const bad = targets.find((t) => t.offset === null || t.offset < 0)
+      if (bad) return `Partition ${bad.partition} needs a target offset of 0 or more`
+      spec.partitions = targets.map((t) => ({ partition: t.partition, offset: t.offset as number }))
+    } else if (chosen.length < partitions.length) {
+      spec.partitions = chosen.map((o) => ({ partition: o.partition }))
+    }
+    return spec
+  }
+
+  const requestReset = (event: FormEvent) => {
+    event.preventDefault()
+    const spec = buildSpec()
+    if (typeof spec === 'string') {
+      setFormError(spec)
+      return
+    }
+    setFormError(null)
+    preview.mutate(spec, {
+      onSuccess: (targets) => setPlan({ spec, targets }),
+      onError: (failure) => toast.error(failure),
+    })
+  }
+
+  const confirmReset = (confirm: string) => {
+    if (!plan) return
+    reset.mutate(
+      { ...plan.spec, confirm },
+      {
+        onSuccess: () => toast.success(`Offsets of ${group} reset.`),
+        onError: (failure) => toast.error(failure),
+        onSettled: () => setPlan(null),
+      },
+    )
+  }
+
+  return (
+    <>
+      <form onSubmit={requestReset} className="space-y-3">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="flex flex-col gap-1 text-sm text-slate-600">
+            <label htmlFor={ids.topic}>Topic</label>
+            <select
+              id={ids.topic}
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              className={INPUT}
+            >
+              {topics.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1 text-sm text-slate-600">
+            <label htmlFor={ids.strategy}>Strategy</label>
+            <select
+              id={ids.strategy}
+              value={strategy}
+              onChange={(e) => setStrategy(e.target.value as ResetStrategy)}
+              className={INPUT}
+            >
+              {Object.entries(STRATEGY_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+          {strategy === 'timestamp' && (
+            <div className="flex flex-col gap-1 text-sm text-slate-600">
+              <label htmlFor={ids.timestamp}>Timestamp</label>
+              <input
+                id={ids.timestamp}
+                type="datetime-local"
+                value={timestamp}
+                onChange={(e) => setTimestamp(e.target.value)}
+                className={INPUT}
+              />
+            </div>
+          )}
+          {strategy === 'shift_by' && (
+            <div className="flex flex-col gap-1 text-sm text-slate-600">
+              <label htmlFor={ids.shift}>Shift by</label>
+              <input
+                id={ids.shift}
+                inputMode="numeric"
+                placeholder="-1000 rewinds, 1 skips one"
+                value={shift}
+                onChange={(e) => setShift(e.target.value)}
+                className={INPUT}
+              />
+            </div>
+          )}
+          <span title={blocked ?? undefined}>
+            <button
+              type="submit"
+              disabled={blocked !== null || topics.length === 0 || preview.isPending || reset.isPending}
+              className={BUTTON}
+            >
+              Reset offsets
+            </button>
+          </span>
+        </div>
+        {formError && <p className="text-sm text-red-700">{formError}</p>}
+
+        {partitions.length > 0 && (
+          <table aria-label="Partitions to reset" className={TABLE}>
+            <thead className="bg-slate-100 text-left text-slate-600">
+              <tr>
+                <th className={TH}>Reset</th>
+                <th className={TH}>Partition</th>
+                <th className={TH}>Committed</th>
+                <th className={TH}>End</th>
+                {strategy === 'to_offset' && <th className={TH}>Target</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {partitions.map((o) => (
+                <tr key={rowKey(o)} className="border-t border-slate-100">
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      aria-label={`Reset partition ${o.partition}`}
+                      checked={row(o).selected}
+                      onChange={(e) => editRow(o, { selected: e.target.checked })}
+                    />
+                  </td>
+                  <td className="px-3 py-2">{o.partition}</td>
+                  <td className="px-3 py-2">{o.committed ?? UNKNOWN}</td>
+                  <td className="px-3 py-2">{o.end ?? UNKNOWN}</td>
+                  {strategy === 'to_offset' && (
+                    <td className="flex items-center gap-2 px-3 py-2">
+                      <input
+                        aria-label={`Target offset of partition ${o.partition}`}
+                        inputMode="numeric"
+                        value={row(o).target}
+                        disabled={!row(o).selected}
+                        onChange={(e) => editRow(o, { target: e.target.value })}
+                        className={`${INPUT} w-32`}
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Skip one on partition ${o.partition}`}
+                        title="Committed offset + 1: skips the next message"
+                        disabled={!row(o).selected || o.committed === null}
+                        onClick={() =>
+                          o.committed !== null && editRow(o, { target: String(o.committed + 1) })
+                        }
+                        className={BUTTON}
+                      >
+                        Skip one
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </form>
+
+      <ConfirmDialog
+        open={plan !== null}
+        title="Reset offsets"
+        description={
+          plan
+            ? `Resets ${group} on topic ${plan.spec.topic} (${STRATEGY_LABELS[plan.spec.strategy]}). Consumers will resume from these offsets; partitions not listed keep theirs.`
+            : ''
+        }
+        expected={group}
+        confirmLabel="Reset offsets"
+        onConfirm={confirmReset}
+        onCancel={() => setPlan(null)}
+      >
+        <ul aria-label="Reset targets" className="mt-3 max-h-48 overflow-y-auto font-mono text-sm">
+          {plan?.targets.map((t) => (
+            <li key={t.partition} className={t.clamped ? 'text-amber-800' : 'text-slate-800'}>
+              partition {t.partition}: {t.current ?? 'none'} → {t.target}
+              {t.clamped && ' (clamped to the log)'}
+            </li>
+          ))}
+        </ul>
+      </ConfirmDialog>
+    </>
   )
 }
