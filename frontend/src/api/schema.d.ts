@@ -182,6 +182,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/clusters/{name}/groups/{group}/reset/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Reset
+         * @description The targets a reset with this body would commit; commits nothing, ignores `confirm`.
+         */
+        post: operations["preview_reset_api_clusters__name__groups__group__reset_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/clusters/{name}/groups/{group}/reset": {
         parameters: {
             query?: never;
@@ -502,6 +522,16 @@ export interface components {
             /** Offsets */
             offsets: components["schemas"]["OffsetItem"][];
         };
+        /** PartitionTarget */
+        PartitionTarget: {
+            /** Partition */
+            partition: number;
+            /**
+             * Offset
+             * @description Required for to_offset, else omitted
+             */
+            offset?: number | null;
+        };
         /** PartitionView */
         PartitionView: {
             /** Id */
@@ -536,6 +566,11 @@ export interface components {
             /** Offset */
             offset: number;
         };
+        /** ResetPreviewView */
+        ResetPreviewView: {
+            /** Targets */
+            targets: components["schemas"]["ResetTargetItem"][];
+        };
         /** ResetRequest */
         ResetRequest: {
             /** Topic */
@@ -544,17 +579,40 @@ export interface components {
              * Strategy
              * @enum {string}
              */
-            strategy: "earliest" | "latest" | "timestamp";
+            strategy: "earliest" | "latest" | "timestamp" | "to_offset" | "shift_by";
             /**
              * Timestamp
              * @description Epoch milliseconds
              */
             timestamp?: number | null;
             /**
+             * Partitions
+             * @description Partitions to reset (omitted: every partition); to_offset needs it
+             */
+            partitions?: components["schemas"]["PartitionTarget"][] | null;
+            /**
+             * Shift
+             * @description shift_by only; negative rewinds
+             */
+            shift?: number | null;
+            /**
              * Confirm
              * @description Must equal the group id
              */
             confirm?: string | null;
+        };
+        /** ResetTargetItem */
+        ResetTargetItem: {
+            /** Topic */
+            topic: string;
+            /** Partition */
+            partition: number;
+            /** Current */
+            current: number | null;
+            /** Target */
+            target: number;
+            /** Clamped */
+            clamped: boolean;
         };
         /** RowResultView */
         RowResultView: {
@@ -1069,6 +1127,42 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_reset_api_clusters__name__groups__group__reset_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+                group: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResetPreviewView"];
+                };
             };
             /** @description Validation Error */
             422: {

@@ -7,7 +7,12 @@ can be open at once, each in its own browser tab.
 - Topics: list, filter, config (human-readable sizes and durations), partition/replica/ISR summary.
 - Messages: snapshot consume (earliest / latest / offset / timestamp), live stream over a WebSocket,
   single publish and bulk publish (CSV or JSON file). Text, JSON and binary (base64) payloads.
-- Consumer groups: list, members, committed offsets and lag, create, reset offsets, delete.
+- Consumer groups: list, members, committed offsets and lag, create, delete, and reset offsets of
+  one topic, on all or chosen partitions, to earliest, latest, a timestamp, an explicit offset per
+  partition or a shift by N. A reset is previewed first (`POST .../reset/preview`): targets outside
+  a partition's `[earliest, end]` are clamped into it and flagged, and partitions not chosen keep
+  their offsets. The UI then commits exactly the previewed targets (as `to_offset`), so nothing
+  that moved after the preview changes what is committed.
 - Browsing leaves no trace on the cluster: consumers use a throwaway `kafka-web-<uuid>` group id,
   `assign()` instead of `subscribe()`, and never commit.
 

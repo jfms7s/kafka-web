@@ -9,6 +9,8 @@ export type GroupMember = components['schemas']['MemberItem']
 export type GroupOffset = components['schemas']['OffsetItem']
 export type CreateGroupRequest = components['schemas']['CreateGroupRequest']
 export type ResetStrategy = components['schemas']['ResetRequest']['strategy']
+export type PartitionTarget = components['schemas']['PartitionTarget']
+export type ResetTarget = components['schemas']['ResetTargetItem']
 
 export const groupsPath = (cluster: string, group?: string) =>
   `/c/${encodeURIComponent(cluster)}/groups${group === undefined ? '' : `/${encodeURIComponent(group)}`}`
@@ -51,14 +53,36 @@ export const useCreateGroup = (cluster: string) =>
     unwrap(api.POST('/api/clusters/{name}/groups', { params: { path: { name: cluster } }, body })),
   )
 
-export interface ResetVars {
+/** What to reset; the same body drives the preview and the commit. */
+export interface ResetSpec {
   topic: string
   strategy: ResetStrategy
   /** Epoch milliseconds; only for `strategy: 'timestamp'`. */
   timestamp?: number
+  /** A subset of partitions (omitted: every partition); `to_offset` gives each an offset. */
+  partitions?: PartitionTarget[]
+  /** Only for `strategy: 'shift_by'`; negative rewinds. */
+  shift?: number
+}
+
+export interface ResetVars extends ResetSpec {
   /** The group id, typed by the user in the confirmation dialog. */
   confirm: string
 }
+
+/** The targets a reset would commit; commits nothing, so it refreshes nothing. */
+export const usePreviewReset = (cluster: string, group: string) =>
+  useMutation({
+    mutationFn: async (body: ResetSpec) =>
+      (
+        await unwrap(
+          api.POST('/api/clusters/{name}/groups/{group}/reset/preview', {
+            params: { path: { name: cluster, group } },
+            body,
+          }),
+        )
+      ).targets,
+  })
 
 export const useResetOffsets = (cluster: string, group: string) =>
   useGroupMutation(cluster, (body: ResetVars) =>
