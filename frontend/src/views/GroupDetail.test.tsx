@@ -209,7 +209,14 @@ describe('GroupDetail reset', () => {
     const request = writes()[0]
     expect(request.method).toBe('POST')
     expect(new URL(request.url).pathname).toBe('/api/clusters/dev/groups/billing/reset')
-    expect(await request.json()).toEqual({ topic: 'payments', strategy: 'earliest', confirm: 'billing' })
+    expect(await previews()[0].json()).toEqual({ topic: 'payments', strategy: 'earliest' })
+    // The commit pins the previewed targets rather than resolving `earliest` again.
+    expect(await request.json()).toEqual({
+      topic: 'payments',
+      strategy: 'to_offset',
+      partitions: [{ partition: 0, offset: 42 }],
+      confirm: 'billing',
+    })
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(await screen.findByText(/Offsets of billing reset/)).toBeInTheDocument()
     await waitFor(() => expect(detailGets().length).toBeGreaterThan(1))
@@ -240,11 +247,10 @@ describe('GroupDetail reset', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Reset offsets' }))
 
     await waitFor(() => expect(writes()).toHaveLength(1))
-    expect(await writes()[0].json()).toEqual({
+    expect(await previews()[0].json()).toEqual({
       topic: 'gone',
       strategy: 'timestamp',
       timestamp: new Date('2024-01-02T03:04').getTime(),
-      confirm: 'billing',
     })
   })
 
@@ -314,7 +320,12 @@ describe('GroupDetail precise reset', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Reset offsets' }))
 
     await waitFor(() => expect(writes()).toHaveLength(1))
-    expect(await writes()[0].json()).toEqual({ ...expected, confirm: 'billing' })
+    expect(await writes()[0].json()).toEqual({
+      topic: 'orders',
+      strategy: 'to_offset',
+      partitions: [{ partition: 0, offset: 10 }], // the previewed (clamped) target
+      confirm: 'billing',
+    })
   })
 
   it('sends a shift and the chosen subset for shift by', async () => {
@@ -333,6 +344,39 @@ describe('GroupDetail precise reset', () => {
       shift: -1000,
       partitions: [{ partition: 1 }],
     })
+  })
+
+  it('commits once even when confirm is clicked twice while the first is in flight', async () => {
+    let release: () => void = () => {}
+    const user = setup({
+      reset: () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(Response.json({ offsets: [] }))
+        }),
+    })
+    await user.click(await screen.findByRole('button', { name: 'Reset offsets' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByRole('textbox'), 'billing')
+    const confirmButton = within(dialog).getByRole('button', { name: 'Reset offsets' })
+
+    await user.click(confirmButton)
+    await waitFor(() => expect(confirmButton).toBeDisabled())
+    await user.click(confirmButton)
+    release()
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(writes()).toHaveLength(1)
+  })
+
+  it.each(['1e3', '0x1F', '1.5'])('refuses a shift of %s', async (shift) => {
+    const user = setup()
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Strategy' }), 'shift_by')
+    await user.type(screen.getByLabelText('Shift by'), shift)
+
+    await user.click(screen.getByRole('button', { name: 'Reset offsets' }))
+
+    expect(screen.getByText('Shift must be a whole number')).toBeInTheDocument()
+    expect(previews()).toHaveLength(0)
   })
 
   it.each([

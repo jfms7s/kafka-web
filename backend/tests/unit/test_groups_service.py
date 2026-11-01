@@ -490,6 +490,25 @@ def test_preview_of_an_active_group_is_409() -> None:
     assert caught.value.code == "group_not_empty"
 
 
+@pytest.mark.parametrize(
+    ("strategy", "kwargs", "field"),
+    [
+        ("timestamp", {}, "timestamp"),
+        ("to_offset", {"offsets": {7: 1}}, "partitions"),
+        ("latest", {"partitions": [5]}, "partitions"),
+        ("shift_by", {}, "shift"),
+    ],
+)
+def test_request_errors_come_before_the_group_state_check(
+    strategy: str, kwargs: dict, field: str
+) -> None:
+    admin = precise_admin(descriptions={"g": group_description("g", "STABLE")})
+
+    with pytest.raises(ValidationFailed) as caught:
+        preview_reset(admin, "g", "orders", strategy, None, **kwargs)  # type: ignore[arg-type]
+    assert caught.value.field == field
+
+
 def test_preview_reports_uncommitted_partitions_as_current_none() -> None:
     admin = precise_admin(committed={"g": {}})
 

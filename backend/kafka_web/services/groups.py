@@ -381,13 +381,23 @@ def _plan_reset(
     offsets: Mapping[int, int] | None,
     shift: int | None,
 ) -> list[ResetTarget]:
-    """Where a reset would move each chosen partition; checks the group is empty first."""
+    """Where a reset would move each chosen partition.
+
+    Request errors (422) come before the group-state check (409), so a bad request is reported
+    as such whatever state the group is in.
+    """
+    if strategy == "timestamp" and (timestamp is None or timestamp < 0):
+        raise ValidationFailed(
+            "timestamp: a non-negative epoch-milliseconds value is required", field="timestamp"
+        )
     if strategy == "to_offset" and not offsets:
         raise ValidationFailed(
             "partitions: to_offset needs an offset for each partition", field="partitions"
         )
     if strategy == "shift_by" and shift is None:
         raise ValidationFailed("shift: required for shift_by", field="shift")
+    requested = list(offsets) if strategy == "to_offset" and offsets else partitions
+    chosen = _chosen_partitions(admin, topic, requested, timeout)
     _require_empty(_describe(admin, group_id, timeout), group_id)
     committed = {
         p: offset
@@ -396,11 +406,9 @@ def _plan_reset(
     }
     if strategy == "to_offset":
         assert offsets is not None
-        chosen = _chosen_partitions(admin, topic, list(offsets), timeout)
         resolved = _clamped_offsets(admin, topic, {p: offsets[p] for p in chosen}, timeout)
     elif strategy == "shift_by":
         assert shift is not None
-        chosen = _chosen_partitions(admin, topic, partitions, timeout)
         missing = [p for p in chosen if p not in committed]
         if missing:
             raise ValidationFailed(
@@ -412,7 +420,6 @@ def _plan_reset(
             admin, topic, {p: committed[p] + shift for p in chosen}, timeout
         )
     else:
-        chosen = _chosen_partitions(admin, topic, partitions, timeout)
         selected = _strategy_offsets(admin, topic, chosen, strategy, timestamp, timeout)
         resolved = {p: (selected[p], False) for p in chosen}
     return [ResetTarget(topic, p, committed.get(p), resolved[p][0], resolved[p][1]) for p in chosen]

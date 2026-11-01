@@ -9,6 +9,8 @@ interface Props {
   confirmLabel: string
   onConfirm: (typed: string) => void
   onCancel: () => void
+  /** While the confirmed action is in flight: confirming again is disabled. */
+  busy?: boolean
   /** Extra detail shown under the description, e.g. what exactly will change. */
   children?: ReactNode
 }
@@ -25,6 +27,7 @@ function Dialog({
   confirmLabel,
   onConfirm,
   onCancel,
+  busy = false,
   children,
 }: Props) {
   const [typed, setTyped] = useState('')
@@ -67,7 +70,7 @@ function Dialog({
           </button>
           <button
             type="button"
-            disabled={!matches}
+            disabled={!matches || busy}
             onClick={() => onConfirm(typed)}
             className="rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
           >

@@ -227,6 +227,7 @@ function Actions({ cluster, group, detail, readOnly }: ActionsProps) {
         description={`Deletes ${group} and all its committed offsets. This cannot be undone.`}
         expected={group}
         confirmLabel="Delete group"
+        busy={remove.isPending}
         onConfirm={confirmDelete}
         onCancel={() => setDeleting(false)}
       />
@@ -253,9 +254,11 @@ const defaultRow = (o: GroupOffset): RowState => ({
   selected: true,
   target: o.committed === null ? '' : String(o.committed),
 })
+/** A whole number typed in decimal (no `1e3`, `0x1F`), within JS's exact integer range. */
 const asOffset = (text: string): number | null => {
-  const value = Number(text.trim())
-  return text.trim() !== '' && Number.isSafeInteger(value) ? value : null
+  const trimmed = text.trim()
+  const value = Number(trimmed)
+  return /^-?\d+$/.test(trimmed) && Number.isSafeInteger(value) ? value : null
 }
 
 interface ResetFormProps {
@@ -335,10 +338,13 @@ function ResetForm({ cluster, group, detail, blocked }: ResetFormProps) {
     })
   }
 
+  // Commit exactly the previewed targets, not the request again: if the log or the committed
+  // offsets moved since the preview, re-resolving would commit something the user never saw.
   const confirmReset = (confirm: string) => {
-    if (!plan) return
+    if (!plan || reset.isPending) return
+    const partitions = plan.targets.map((t) => ({ partition: t.partition, offset: t.target }))
     reset.mutate(
-      { ...plan.spec, confirm },
+      { topic: plan.spec.topic, strategy: 'to_offset', partitions, confirm },
       {
         onSuccess: () => toast.success(`Offsets of ${group} reset.`),
         onError: (failure) => toast.error(failure),
@@ -484,6 +490,7 @@ function ResetForm({ cluster, group, detail, blocked }: ResetFormProps) {
         }
         expected={group}
         confirmLabel="Reset offsets"
+        busy={reset.isPending}
         onConfirm={confirmReset}
         onCancel={() => setPlan(null)}
       >
